@@ -19,6 +19,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -62,7 +64,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { HOME, WAITING, SESSION }
+enum class Screen { HOME, PRIVACY, WAITING, SESSION }
 
 class MainActivity : ComponentActivity() {
 
@@ -808,6 +810,12 @@ class MainActivity : ComponentActivity() {
                                 current = Screen.WAITING
                                 requestSupport()
                             },
+                            onOpenPrivacy = { current = Screen.PRIVACY },
+                            textMuted = Color(0xFF8A8A8E)
+                        )
+
+                        Screen.PRIVACY -> PrivacyPolicyScreen(
+                            onBack = { current = Screen.HOME },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -894,6 +902,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun HomeScreen(
     onRequestSupport: () -> Unit,
+    onOpenPrivacy: () -> Unit,
     textMuted: Color
 ) {
     val ctx = LocalContext.current
@@ -912,6 +921,14 @@ private fun HomeScreen(
         ) { Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(16.dp))
         Text("Tempo médio de atendimento: 2–5 min", color = textMuted, fontSize = 16.sp)
+        Spacer(Modifier.height(28.dp))
+        OutlinedButton(
+            onClick = onOpenPrivacy,
+            modifier = Modifier.fillMaxWidth().height(58.dp),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Text("Politica de privacidade", fontWeight = FontWeight.SemiBold)
+        }
         Spacer(Modifier.weight(1f))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -931,6 +948,77 @@ private fun HomeScreen(
                 })
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun PrivacyPolicyScreen(
+    onBack: () -> Unit,
+    textMuted: Color
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 18.dp)
+    ) {
+        OutlinedButton(onClick = onBack) {
+            Text("Voltar")
+        }
+        Spacer(Modifier.height(14.dp))
+        Text("Politica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("Suporte X • Atualizado em 10/03/2026", color = textMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(14.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            PolicySection(
+                title = "1. Dados que coletamos",
+                body = "Coletamos dados necessarios para atendimento tecnico remoto, como nome informado no app, identificadores de sessao, dados tecnicos do dispositivo, mensagens trocadas no chat e arquivos enviados durante o suporte."
+            )
+            PolicySection(
+                title = "2. Finalidade de uso",
+                body = "As informacoes sao usadas para identificar o atendimento, prestar suporte, registrar historico da sessao, melhorar a qualidade do servico e manter a seguranca operacional da plataforma."
+            )
+            PolicySection(
+                title = "3. Compartilhamento e seguranca",
+                body = "Nao vendemos dados pessoais. O compartilhamento ocorre apenas com provedores essenciais de infraestrutura e armazenamento, com controles de acesso, autenticacao e registros de auditoria."
+            )
+            PolicySection(
+                title = "4. Permissoes e controle do usuario",
+                body = "Recursos sensiveis, como compartilhamento de tela e acesso remoto, dependem de autorizacao explicita do usuario e podem ser interrompidos a qualquer momento no proprio aplicativo."
+            )
+            PolicySection(
+                title = "5. Retencao e direitos",
+                body = "Mantemos dados pelo periodo necessario para suporte, obrigacoes legais e seguranca. O usuario pode solicitar atualizacao, revisao ou exclusao de dados conforme a legislacao aplicavel."
+            )
+            PolicySection(
+                title = "6. Contato",
+                body = "Para duvidas sobre privacidade, seguranca ou tratamento de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Text("Voltar ao app", fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun PolicySection(title: String, body: String) {
+    Column {
+        Text(title, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+        Spacer(Modifier.height(6.dp))
+        Text(body, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(Modifier.height(14.dp))
     }
 }
 
