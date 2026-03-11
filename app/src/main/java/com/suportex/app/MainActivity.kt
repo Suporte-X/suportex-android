@@ -14,6 +14,7 @@ import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -782,6 +783,21 @@ class MainActivity : ComponentActivity() {
                 var systemMessage by remember { mutableStateOf<String?>(null) }
                 var isRecordingAudio by remember { mutableStateOf(false) }
 
+                BackHandler {
+                    when (current) {
+                        Screen.PRIVACY -> current = Screen.HOME
+                        Screen.WAITING -> {
+                            requestId?.let { cancelRequest(it) }
+                            requestId = null
+                            sessionId = null
+                            currentSessionId = null
+                            current = Screen.HOME
+                        }
+                        Screen.SESSION -> current = Screen.HOME
+                        Screen.HOME -> finish()
+                    }
+                }
+
                 // Bridges Activity -> Compose
                 LaunchedEffect(Unit) {
                     setIsSharingFromLauncher = { isSharing = it }
@@ -815,7 +831,7 @@ class MainActivity : ComponentActivity() {
                         )
 
                         Screen.PRIVACY -> PrivacyPolicyScreen(
-                            onBack = { current = Screen.HOME },
+                            onClose = { current = Screen.HOME },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -921,14 +937,6 @@ private fun HomeScreen(
         ) { Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(16.dp))
         Text("Tempo médio de atendimento: 2–5 min", color = textMuted, fontSize = 16.sp)
-        Spacer(Modifier.height(28.dp))
-        OutlinedButton(
-            onClick = onOpenPrivacy,
-            modifier = Modifier.fillMaxWidth().height(58.dp),
-            shape = RoundedCornerShape(18.dp)
-        ) {
-            Text("Politica de privacidade", fontWeight = FontWeight.SemiBold)
-        }
         Spacer(Modifier.weight(1f))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -939,7 +947,7 @@ private fun HomeScreen(
             Text("  ·  ", color = textMuted)
             Text("Privacidade", color = textMuted,
                 modifier = Modifier.clickable {
-                    Toast.makeText(ctx, "Política de privacidade (em breve)", Toast.LENGTH_SHORT).show()
+                    onOpenPrivacy()
                 })
             Text("  ·  ", color = textMuted)
             Text("Termos", color = textMuted,
@@ -953,7 +961,7 @@ private fun HomeScreen(
 
 @Composable
 private fun PrivacyPolicyScreen(
-    onBack: () -> Unit,
+    onClose: () -> Unit,
     textMuted: Color
 ) {
     Column(
@@ -961,10 +969,15 @@ private fun PrivacyPolicyScreen(
             .fillMaxSize()
             .padding(horizontal = 20.dp, vertical = 18.dp)
     ) {
-        OutlinedButton(onClick = onBack) {
-            Text("Voltar")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(onClick = onClose) {
+                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(6.dp))
         Text("Politica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X • Atualizado em 10/03/2026", color = textMuted, fontSize = 13.sp)
@@ -999,15 +1012,6 @@ private fun PrivacyPolicyScreen(
                 title = "6. Contato",
                 body = "Para duvidas sobre privacidade, seguranca ou tratamento de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
             )
-        }
-
-        Spacer(Modifier.height(12.dp))
-        Button(
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth().height(54.dp),
-            shape = RoundedCornerShape(18.dp)
-        ) {
-            Text("Voltar ao app", fontWeight = FontWeight.SemiBold)
         }
     }
 }
