@@ -65,7 +65,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { HOME, PRIVACY, WAITING, SESSION }
+enum class Screen { HOME, PRIVACY, TERMS, WAITING, SESSION }
 
 class MainActivity : ComponentActivity() {
 
@@ -101,6 +101,7 @@ class MainActivity : ComponentActivity() {
     private var callingActive = false
     private var callConnectedActive = false
     private var shareRequestFromCommand = false
+    private var remoteConsentAcceptedForCurrentSession = false
     private var pendingAudioAction: (() -> Unit)? = null
     private var mediaRecorder: MediaRecorder? = null
     private var audioTempFile: File? = null
@@ -210,15 +211,60 @@ class MainActivity : ComponentActivity() {
         emitTelemetry()
     }
 
-    private fun requestRemoteStateChange(enabled: Boolean) {
-        if (enabled && !isAccessibilityServiceEnabled()) {
-            openAccessibilitySettings()
-            setSystemMessageFromLauncher?.invoke(
-                "Ative em Acessibilidade → SuporteX → Ativar para permitir o controle remoto."
-            )
+    private fun ensureRemoteAccessConsent(onApproved: () -> Unit) {
+        if (remoteConsentAcceptedForCurrentSession) {
+            onApproved()
+            return
         }
-        updateRemoteState(enabled, origin = "client")
-        sendCommand(if (enabled) "remote_enable" else "remote_revoke")
+
+        val message = """
+            Para que o suporte técnico possa ser realizado, o aplicativo Suporte X pode solicitar permissões temporárias como:
+            
+            • compartilhamento de tela
+            • acesso assistido ao dispositivo
+            • envio de arquivos e informações técnicas
+            
+            Essas permissões são utilizadas exclusivamente durante a sessão de suporte técnico.
+            
+            O acesso remoto somente será iniciado após sua autorização explícita e pode ser interrompido a qualquer momento diretamente no aplicativo.
+            
+            Nenhuma ação será realizada no dispositivo sem a autorização do usuário.
+            
+            Ao continuar, você confirma que está solicitando suporte técnico e autoriza temporariamente o acesso necessário para a realização do atendimento.
+        """.trimIndent()
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Autorização de Acesso Remoto")
+            .setMessage(message)
+            .setCancelable(true)
+            .setNegativeButton("Cancelar") { dialog, _ ->
+                dialog.dismiss()
+            }
+            .setPositiveButton("Continuar") { dialog, _ ->
+                remoteConsentAcceptedForCurrentSession = true
+                dialog.dismiss()
+                onApproved()
+            }
+            .show()
+    }
+
+    private fun requestRemoteStateChange(enabled: Boolean) {
+        if (enabled) {
+            ensureRemoteAccessConsent {
+                if (!isAccessibilityServiceEnabled()) {
+                    openAccessibilitySettings()
+                    setSystemMessageFromLauncher?.invoke(
+                        "Ative em Acessibilidade → SuporteX → Ativar para permitir o controle remoto."
+                    )
+                }
+                updateRemoteState(enabled = true, origin = "client")
+                sendCommand("remote_enable")
+            }
+            return
+        }
+
+        updateRemoteState(enabled = false, origin = "client")
+        sendCommand("remote_revoke")
     }
 
     private fun updateCallState(calling: Boolean, connected: Boolean, origin: String) {
@@ -518,6 +564,7 @@ class MainActivity : ComponentActivity() {
         voiceCallManager.release()
         resetSessionState()
         currentSessionId = null
+        remoteConsentAcceptedForCurrentSession = false
         Conn.sessionId = null
         Conn.techName = null
     }
@@ -596,6 +643,7 @@ class MainActivity : ComponentActivity() {
                     Conn.sessionId = sid
                     Conn.techName = tname
                     currentSessionId = sid
+                    remoteConsentAcceptedForCurrentSession = false
                     resetSessionState()
                     voiceCallManager.bindSession(sid)
                     registerSessionStart(sid, tname)
@@ -664,8 +712,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         shareRequestFromCommand = fromCommand
-        val intent = mediaProjectionManager.createScreenCaptureIntent()
-        screenCaptureLauncher.launch(intent)
+        ensureRemoteAccessConsent {
+            val intent = mediaProjectionManager.createScreenCaptureIntent()
+            screenCaptureLauncher.launch(intent)
+        }
     }
 
     // -------- Screen share launcher --------
@@ -786,6 +836,7 @@ class MainActivity : ComponentActivity() {
                 BackHandler {
                     when (current) {
                         Screen.PRIVACY -> current = Screen.HOME
+                        Screen.TERMS -> current = Screen.HOME
                         Screen.WAITING -> {
                             requestId?.let { cancelRequest(it) }
                             requestId = null
@@ -827,10 +878,16 @@ class MainActivity : ComponentActivity() {
                                 requestSupport()
                             },
                             onOpenPrivacy = { current = Screen.PRIVACY },
+                            onOpenTerms = { current = Screen.TERMS },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
                         Screen.PRIVACY -> PrivacyPolicyScreen(
+                            onClose = { current = Screen.HOME },
+                            textMuted = Color(0xFF8A8A8E)
+                        )
+
+                        Screen.TERMS -> TermsOfUseScreen(
                             onClose = { current = Screen.HOME },
                             textMuted = Color(0xFF8A8A8E)
                         )
@@ -919,6 +976,7 @@ class MainActivity : ComponentActivity() {
 private fun HomeScreen(
     onRequestSupport: () -> Unit,
     onOpenPrivacy: () -> Unit,
+    onOpenTerms: () -> Unit,
     textMuted: Color
 ) {
     val ctx = LocalContext.current
@@ -952,7 +1010,7 @@ private fun HomeScreen(
             Text("  ·  ", color = textMuted)
             Text("Termos", color = textMuted,
                 modifier = Modifier.clickable {
-                    Toast.makeText(ctx, "Termos de uso (em breve)", Toast.LENGTH_SHORT).show()
+                    onOpenTerms()
                 })
         }
         Spacer(Modifier.height(24.dp))
@@ -978,9 +1036,84 @@ private fun PrivacyPolicyScreen(
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text("Politica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("Política de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
-        Text("Suporte X • Atualizado em 10/03/2026", color = textMuted, fontSize = 13.sp)
+        Text("Suporte X", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 11 de março de 2026", color = textMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(14.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                "A Suporte X valoriza a privacidade e a segurança dos dados dos usuários. Esta Política de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informações durante a utilização do aplicativo e dos serviços de suporte técnico remoto.",
+                fontSize = 14.sp,
+                lineHeight = 20.sp
+            )
+            Spacer(Modifier.height(14.dp))
+            PolicySection(
+                title = "1. Dados que coletamos",
+                body = "Para a prestação adequada do serviço de suporte técnico remoto, podemos coletar as seguintes informações:\n\n• Nome informado pelo usuário no aplicativo\n• Identificadores de sessão e atendimento\n• Informações técnicas do dispositivo utilizado\n• Mensagens trocadas no chat de atendimento\n• Arquivos enviados durante o suporte técnico\n• Registros técnicos necessários para diagnóstico e resolução de problemas\n\nEssas informações são coletadas exclusivamente para viabilizar o funcionamento do serviço de suporte."
+            )
+            PolicySection(
+                title = "2. Finalidade do uso dos dados",
+                body = "Os dados coletados são utilizados para:\n\n• Identificar o usuário durante o atendimento\n• Realizar suporte técnico remoto\n• Registrar o histórico de sessões de atendimento\n• Diagnosticar e solucionar problemas técnicos\n• Melhorar a qualidade e eficiência do serviço\n• Garantir a segurança e integridade da plataforma"
+            )
+            PolicySection(
+                title = "3. Compartilhamento de dados",
+                body = "A Suporte X não vende, aluga ou comercializa dados pessoais dos usuários.\n\nO compartilhamento de informações pode ocorrer apenas quando necessário com:\n\n• Provedores de infraestrutura e hospedagem\n• Serviços de armazenamento de dados\n• Ferramentas necessárias para o funcionamento da plataforma\n\nTodos os parceiros seguem padrões de segurança e proteção de dados compatíveis com a legislação aplicável."
+            )
+            PolicySection(
+                title = "4. Permissões e controle do usuário",
+                body = "Alguns recursos do aplicativo podem solicitar permissões específicas do dispositivo, como:\n\n• Compartilhamento de tela\n• Acesso remoto ao dispositivo\n• Envio de arquivos ou imagens\n\nEssas permissões são sempre solicitadas com autorização explícita do usuário e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
+            )
+            PolicySection(
+                title = "5. Armazenamento e retenção de dados",
+                body = "Os dados coletados são armazenados apenas pelo período necessário para:\n\n• Prestação do suporte técnico\n• Cumprimento de obrigações legais\n• Garantia da segurança operacional do serviço\n\nApós esse período, os dados podem ser excluídos ou anonimizados."
+            )
+            PolicySection(
+                title = "6. Direitos do usuário",
+                body = "Em conformidade com a Lei Geral de Proteção de Dados (LGPD – Lei nº 13.709/2018), o usuário possui o direito de:\n\n• Solicitar acesso aos seus dados\n• Corrigir dados incompletos ou desatualizados\n• Solicitar exclusão de dados quando aplicável\n• Solicitar informações sobre o tratamento de dados\n\nAs solicitações podem ser feitas pelos canais de contato oficiais."
+            )
+            PolicySection(
+                title = "7. Segurança das informações",
+                body = "A Suporte X adota medidas técnicas e organizacionais para proteger os dados contra acesso não autorizado, alteração, divulgação ou destruição indevida.\n\nEntre as medidas aplicadas estão:\n\n• Controle de acesso aos dados\n• Autenticação segura\n• Registros de auditoria\n• Proteção da infraestrutura da plataforma"
+            )
+            PolicySection(
+                title = "8. Contato",
+                body = "Para dúvidas, solicitações ou questões relacionadas à privacidade e proteção de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+            )
+        }
+    }
+}
+
+@Composable
+private fun TermsOfUseScreen(
+    onClose: () -> Unit,
+    textMuted: Color
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 18.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(onClick = onClose) {
+                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("Termos de Uso", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("Suporte X", color = textMuted, fontSize = 13.sp)
+        Text("Operado por Xavier Assessoria Digital", color = textMuted, fontSize = 13.sp)
+        Text("CNPJ: 45.765.097/0001-61", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 11 de março de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -989,28 +1122,36 @@ private fun PrivacyPolicyScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             PolicySection(
-                title = "1. Dados que coletamos",
-                body = "Coletamos dados necessarios para atendimento tecnico remoto, como nome informado no app, identificadores de sessao, dados tecnicos do dispositivo, mensagens trocadas no chat e arquivos enviados durante o suporte."
+                title = "1. Sobre o serviço",
+                body = "O Suporte X é uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realização de suporte técnico remoto entre técnicos e usuários, por meio de comunicação em tempo real, compartilhamento de tela e ferramentas de assistência remota.\n\nO serviço tem como objetivo facilitar o diagnóstico e a resolução de problemas técnicos diretamente no dispositivo do usuário, mediante autorização expressa do mesmo."
             )
             PolicySection(
-                title = "2. Finalidade de uso",
-                body = "As informacoes sao usadas para identificar o atendimento, prestar suporte, registrar historico da sessao, melhorar a qualidade do servico e manter a seguranca operacional da plataforma."
+                title = "2. Aceitação dos termos",
+                body = "Ao utilizar o aplicativo Suporte X, o usuário declara que:\n\n• leu e compreendeu estes Termos de Uso\n• concorda com as condições aqui estabelecidas\n• autoriza o funcionamento das funcionalidades necessárias para o suporte técnico remoto\n\nCaso o usuário não concorde com estes termos, não deverá utilizar o aplicativo."
             )
             PolicySection(
-                title = "3. Compartilhamento e seguranca",
-                body = "Nao vendemos dados pessoais. O compartilhamento ocorre apenas com provedores essenciais de infraestrutura e armazenamento, com controles de acesso, autenticacao e registros de auditoria."
+                title = "3. Funcionamento do suporte remoto",
+                body = "Durante uma sessão de suporte, o usuário poderá autorizar funcionalidades como:\n\n• compartilhamento de tela\n• envio de arquivos\n• comunicação por chat ou áudio\n• controle remoto assistido do dispositivo\n\nEssas funcionalidades só são ativadas com autorização explícita do usuário e podem ser interrompidas a qualquer momento pelo próprio aplicativo."
             )
             PolicySection(
-                title = "4. Permissoes e controle do usuario",
-                body = "Recursos sensiveis, como compartilhamento de tela e acesso remoto, dependem de autorizacao explicita do usuario e podem ser interrompidos a qualquer momento no proprio aplicativo."
+                title = "4. Responsabilidades do usuário",
+                body = "O usuário é responsável por:\n\n• conceder permissões apenas quando desejar iniciar um atendimento\n• encerrar a sessão de suporte quando considerar necessário\n• não utilizar o aplicativo para atividades ilegais ou abusivas"
             )
             PolicySection(
-                title = "5. Retencao e direitos",
-                body = "Mantemos dados pelo periodo necessario para suporte, obrigacoes legais e seguranca. O usuario pode solicitar atualizacao, revisao ou exclusao de dados conforme a legislacao aplicavel."
+                title = "5. Limitação de responsabilidade",
+                body = "A Xavier Assessoria Digital não se responsabiliza por:\n\n• falhas causadas por terceiros\n• problemas decorrentes de uso indevido do dispositivo\n• indisponibilidade temporária de serviços externos"
             )
             PolicySection(
-                title = "6. Contato",
-                body = "Para duvidas sobre privacidade, seguranca ou tratamento de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+                title = "6. Modificações do serviço",
+                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de segurança, desempenho ou conformidade legal."
+            )
+            PolicySection(
+                title = "7. Legislação aplicável",
+                body = "Este serviço é regido pelas leis da República Federativa do Brasil, especialmente pela:\n\n• Lei Geral de Proteção de Dados (LGPD – Lei nº 13.709/2018)"
+            )
+            PolicySection(
+                title = "8. Contato",
+                body = "Empresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895w\nResidencial Paraíso\nNova Mutum – MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
     }
