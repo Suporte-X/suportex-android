@@ -28,7 +28,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -65,7 +64,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { HOME, PRIVACY, TERMS, WAITING, SESSION }
+enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION }
 
 class MainActivity : ComponentActivity() {
 
@@ -835,6 +834,7 @@ class MainActivity : ComponentActivity() {
 
                 BackHandler {
                     when (current) {
+                        Screen.HELP -> current = Screen.HOME
                         Screen.PRIVACY -> current = Screen.HOME
                         Screen.TERMS -> current = Screen.HOME
                         Screen.WAITING -> {
@@ -877,8 +877,14 @@ class MainActivity : ComponentActivity() {
                                 current = Screen.WAITING
                                 requestSupport()
                             },
+                            onOpenHelp = { current = Screen.HELP },
                             onOpenPrivacy = { current = Screen.PRIVACY },
                             onOpenTerms = { current = Screen.TERMS },
+                            textMuted = Color(0xFF8A8A8E)
+                        )
+
+                        Screen.HELP -> HelpScreen(
+                            onClose = { current = Screen.HOME },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -975,12 +981,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun HomeScreen(
     onRequestSupport: () -> Unit,
+    onOpenHelp: () -> Unit,
     onOpenPrivacy: () -> Unit,
     onOpenTerms: () -> Unit,
     textMuted: Color
 ) {
-    val ctx = LocalContext.current
-
     Column(
         Modifier.fillMaxSize().padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -1000,7 +1005,7 @@ private fun HomeScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Ajuda", color = textMuted,
                 modifier = Modifier.clickable {
-                    Toast.makeText(ctx, "Ajuda (em breve)", Toast.LENGTH_SHORT).show()
+                    onOpenHelp()
                 })
             Text("  ·  ", color = textMuted)
             Text("Privacidade", color = textMuted,
@@ -1014,6 +1019,64 @@ private fun HomeScreen(
                 })
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun HelpScreen(
+    onClose: () -> Unit,
+    textMuted: Color
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 18.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(onClick = onClose) {
+                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("Ajuda", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("Suporte X", color = textMuted, fontSize = 13.sp)
+        Text("Guia rápido de atendimento", color = textMuted, fontSize = 13.sp)
+        Spacer(Modifier.height(14.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+        ) {
+            PolicySection(
+                title = "1. Como iniciar um atendimento",
+                body = "Toque em SOLICITAR SUPORTE e aguarde a conexão com um técnico. Quando o atendimento for aceito, a sessão será aberta automaticamente no aplicativo."
+            )
+            PolicySection(
+                title = "2. Permissões durante o suporte",
+                body = "Alguns atendimentos podem exigir permissões temporárias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissões são opcionais e você controla todas elas no app."
+            )
+            PolicySection(
+                title = "3. Segurança da sessão",
+                body = "Nenhuma ação remota é iniciada sem sua autorização explícita. Você pode interromper o compartilhamento e revogar permissões a qualquer momento."
+            )
+            PolicySection(
+                title = "4. Encerrar atendimento",
+                body = "Quando desejar, finalize o suporte pelo botão de encerramento na tela de sessão. Você também pode interromper permissões diretamente nas configurações do seu dispositivo."
+            )
+            PolicySection(
+                title = "5. Problemas comuns",
+                body = "Se a conexão estiver instável, verifique internet, bateria e permissões do app. Em caso de falha de acesso remoto, confira se o serviço de acessibilidade do Suporte X está ativado."
+            )
+            PolicySection(
+                title = "6. Canais oficiais",
+                body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
+            )
+        }
     }
 }
 
