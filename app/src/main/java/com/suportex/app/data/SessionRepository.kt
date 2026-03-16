@@ -10,6 +10,19 @@ class SessionRepository {
     private val db = FirebaseDataSource.db
     private val authRepository = AuthRepository()
 
+    suspend fun bindClient(sessionId: String): String {
+        val uid = authRepository.ensureAnonAuth()
+        db.collection("sessions").document(sessionId)
+            .set(
+                mapOf(
+                    "clientUid" to uid,
+                    "updatedAt" to System.currentTimeMillis()
+                ),
+                SetOptions.merge()
+            ).await()
+        return uid
+    }
+
     suspend fun startSession(
         sessionId: String,
         client: SessionClientInfo,

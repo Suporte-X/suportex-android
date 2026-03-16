@@ -1,11 +1,15 @@
 package com.suportex.app.data
 
 import android.net.Uri
+import android.util.Log
 import com.google.android.gms.tasks.Task
+import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.suportex.app.data.model.Message
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.UUID
 import kotlin.coroutines.resume
@@ -17,41 +21,58 @@ class ChatRepository {
     private val authRepository = AuthRepository()
 
     fun observeMessages(sessionId: String) = callbackFlow<List<Message>> {
-        val reg = db.collection("sessions").document(sessionId)
-            .collection("messages")
-            .orderBy("ts", Query.Direction.ASCENDING)
-            .addSnapshotListener { snap, _ ->
-                val list = snap?.documents?.map { doc ->
-                    val data = doc.data ?: emptyMap()
-                    val text = (data["text"] as? String)?.takeIf { it.isNotBlank() }
-                    val imageUrl = (data["imageUrl"] as? String)?.takeIf { it.isNotBlank() }
-                    val fileUrl = (data["fileUrl"] as? String)?.takeIf { it.isNotBlank() }
-                    val audioUrl = (data["audioUrl"] as? String)?.takeIf { it.isNotBlank() }
-                    Message(
-                        id = (data["id"] as? String)?.takeIf { it.isNotBlank() } ?: doc.id,
-                        sessionId = (data["sessionId"] as? String)?.takeIf { it.isNotBlank() } ?: sessionId,
-                        from = data["from"] as? String ?: "",
-                        fromName = data["fromName"] as? String?,
-                        text = text,
-                        imageUrl = imageUrl ?: fileUrl,
-                        fileUrl = fileUrl ?: imageUrl,
-                        audioUrl = audioUrl,
-                        type = data["type"] as? String ?: when {
-                            audioUrl != null -> "audio"
-                            imageUrl != null || fileUrl != null -> "image"
-                            text != null -> "text"
-                            else -> "file"
-                        },
-                        status = data["status"] as? String ?: "sent",
-                        createdAt = when (val ts = data["ts"] ?: data["createdAt"]) {
-                            is Number -> ts.toLong()
-                            else -> System.currentTimeMillis()
-                        }
-                    )
-                } ?: emptyList()
-                trySend(list)
-            }
-        awaitClose { reg.remove() }
+        var reg: ListenerRegistration? = null
+        val authAndListenJob = launch(Dispatchers.IO) {
+            runCatching { authRepository.ensureAnonAuth() }
+                .onFailure { err ->
+                    Log.e(TAG, "observeMessages auth failed for session=$sessionId", err)
+                    close(err)
+                    return@launch
+                }
+
+            reg = db.collection("sessions").document(sessionId)
+                .collection("messages")
+                .orderBy("ts", Query.Direction.ASCENDING)
+                .addSnapshotListener { snap, error ->
+                    if (error != null) {
+                        Log.e(TAG, "observeMessages listener error for session=$sessionId", error)
+                        return@addSnapshotListener
+                    }
+                    val list = snap?.documents?.map { doc ->
+                        val data = doc.data ?: emptyMap()
+                        val text = (data["text"] as? String)?.takeIf { it.isNotBlank() }
+                        val imageUrl = (data["imageUrl"] as? String)?.takeIf { it.isNotBlank() }
+                        val fileUrl = (data["fileUrl"] as? String)?.takeIf { it.isNotBlank() }
+                        val audioUrl = (data["audioUrl"] as? String)?.takeIf { it.isNotBlank() }
+                        Message(
+                            id = (data["id"] as? String)?.takeIf { it.isNotBlank() } ?: doc.id,
+                            sessionId = (data["sessionId"] as? String)?.takeIf { it.isNotBlank() } ?: sessionId,
+                            from = data["from"] as? String ?: "",
+                            fromName = data["fromName"] as? String?,
+                            text = text,
+                            imageUrl = imageUrl ?: fileUrl,
+                            fileUrl = fileUrl ?: imageUrl,
+                            audioUrl = audioUrl,
+                            type = data["type"] as? String ?: when {
+                                audioUrl != null -> "audio"
+                                imageUrl != null || fileUrl != null -> "image"
+                                text != null -> "text"
+                                else -> "file"
+                            },
+                            status = data["status"] as? String ?: "sent",
+                            createdAt = when (val ts = data["ts"] ?: data["createdAt"]) {
+                                is Number -> ts.toLong()
+                                else -> System.currentTimeMillis()
+                            }
+                        )
+                    } ?: emptyList()
+                    trySend(list)
+                }
+        }
+        awaitClose {
+            authAndListenJob.cancel()
+            reg?.remove()
+        }
     }
 
     suspend fun sendText(sessionId: String, from: String, text: String) {
@@ -184,6 +205,8 @@ class ChatRepository {
 }
 
 /* ---- Task<T>.await sem dependências extras ---- */
+private const val TAG = "SXS/ChatRepo"
+
 private suspend fun <T> Task<T>.await(): T =
     suspendCancellableCoroutine { cont ->
         addOnCompleteListener { task ->

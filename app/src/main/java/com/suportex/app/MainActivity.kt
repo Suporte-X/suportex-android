@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import com.suportex.app.data.model.Message
+import com.suportex.app.data.AuthRepository
 import com.suportex.app.data.SessionClientInfo
 import com.suportex.app.data.SessionRepository
 import com.suportex.app.data.SessionState
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
     private val http = OkHttpClient()
 
     private val sessionRepository = SessionRepository()
+    private val authRepository = AuthRepository()
 
     // Bridges Activity -> Compose (já existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
@@ -183,7 +185,12 @@ class MainActivity : ComponentActivity() {
         )
         val techInfo = techName?.takeIf { it.isNotBlank() }?.let { SessionTechInfo(name = it) }
         lifecycleScope.launch(Dispatchers.IO) {
-            runCatching { sessionRepository.startSession(sessionId, clientInfo, techInfo) }
+            runCatching {
+                sessionRepository.bindClient(sessionId)
+                sessionRepository.startSession(sessionId, clientInfo, techInfo)
+            }.onFailure { err ->
+                Log.e("SXS/Main", "Falha ao registrar início da sessão $sessionId", err)
+            }
         }
     }
 
@@ -681,14 +688,24 @@ class MainActivity : ComponentActivity() {
 
     // Disparar pedido de suporte
     private fun requestSupport() {
-        val payload = JSONObject(
-            mapOf(
-                "clientName" to "Android ${Build.MODEL ?: ""}".trim(),
-                "brand" to (Build.BRAND ?: "Android"),
-                "model" to (Build.MODEL ?: "")
-            )
-        )
-        socket.emit("support:request", payload)
+        lifecycleScope.launch(Dispatchers.IO) {
+            val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+            val payload = JSONObject().apply {
+                put("clientName", "Android ${Build.MODEL ?: ""}".trim())
+                put("brand", Build.BRAND ?: "Android")
+                put("model", Build.MODEL ?: "")
+                put("device", JSONObject().apply {
+                    put("brand", Build.BRAND ?: "Android")
+                    put("model", Build.MODEL ?: "")
+                    put("osVersion", Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString())
+                })
+                if (!uid.isNullOrBlank()) {
+                    put("clientUid", uid)
+                    put("uid", uid)
+                }
+            }
+            socket.emit("support:request", payload)
+        }
     }
 
     // Cancelar (opcional) – pelo endpoint HTTP do servidor
