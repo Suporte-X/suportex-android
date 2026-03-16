@@ -690,6 +690,14 @@ class MainActivity : ComponentActivity() {
     private fun requestSupport() {
         lifecycleScope.launch(Dispatchers.IO) {
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+            if (uid.isNullOrBlank()) {
+                Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
+                runOnUiThread {
+                    setScreenFromSocket?.invoke(Screen.HOME)
+                    setSystemMessageFromLauncher?.invoke("Falha de autenticação. Tente novamente em alguns segundos.")
+                }
+                return@launch
+            }
             val payload = JSONObject().apply {
                 put("clientName", "Android ${Build.MODEL ?: ""}".trim())
                 put("brand", Build.BRAND ?: "Android")
@@ -699,10 +707,8 @@ class MainActivity : ComponentActivity() {
                     put("model", Build.MODEL ?: "")
                     put("osVersion", Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString())
                 })
-                if (!uid.isNullOrBlank()) {
-                    put("clientUid", uid)
-                    put("uid", uid)
-                }
+                put("clientUid", uid)
+                put("uid", uid)
             }
             socket.emit("support:request", payload)
         }
