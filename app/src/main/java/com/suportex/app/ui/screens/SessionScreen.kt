@@ -66,6 +66,7 @@ import org.json.JSONObject
 @Composable
 fun SessionScreen(
     sessionId: String? = null,
+    technicianName: String = "T\u00e9cnico",
     isSharing: Boolean,
     remoteEnabled: Boolean,
     calling: Boolean,
@@ -133,6 +134,17 @@ fun SessionScreen(
     )
 
     val callIsConnected = callConnected || callState == CallState.IN_CALL
+    val showIncomingCallPrompt =
+        callState == CallState.INCOMING_RINGING && callDirection == CallDirection.TECH_TO_CLIENT
+    val showIdleCallAction =
+        !calling && callState in setOf(
+            CallState.IDLE,
+            CallState.ENDED,
+            CallState.FAILED,
+            CallState.DECLINED,
+            CallState.TIMEOUT
+        )
+    val showConnectingState = !showIncomingCallPrompt && !callIsConnected && callState == CallState.CONNECTING
 
     // === Timer da ligação (só conta quando callIsConnected = true) ===
     var callSeconds by remember { mutableIntStateOf(0) }
@@ -341,7 +353,10 @@ fun SessionScreen(
 
                 Spacer(Modifier.height(8.dp))
 
-                Row { Text("Técnico: ", fontWeight = FontWeight.SemiBold); Text("Isac Xavier") }
+                Row {
+                    Text("T\u00e9cnico: ", fontWeight = FontWeight.SemiBold)
+                    Text(technicianName.ifBlank { "T\u00e9cnico" })
+                }
 
                 Spacer(Modifier.height(8.dp))
 
@@ -428,7 +443,7 @@ fun SessionScreen(
 // pode manter o espaçamento seguinte como estava, ou reduzir um pouco se quiser
         Spacer(Modifier.height(10.dp))
 
-        if (callState == CallState.INCOMING_RINGING && callDirection == CallDirection.TECH_TO_CLIENT) {
+        if (showIncomingCallPrompt) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
@@ -471,9 +486,9 @@ fun SessionScreen(
         }
 
         // BOTÃO DE CHAMADA — três estados: parado / chamando / conectado (com chip de tempo)
-        when {
+        if (!showIncomingCallPrompt) when {
             // 1) NÃO EM CHAMADA
-            !calling -> {
+            showIdleCallAction -> {
                 OutlinedButton(
                     onClick = onStartCall,
                     enabled = sessionId != null,
@@ -494,7 +509,7 @@ fun SessionScreen(
             }
 
             // 2) EM CHAMADA, AINDA CONECTANDO (técnico não atendeu)
-            calling && !callIsConnected -> {
+            showConnectingState -> {
                 Button(
                     onClick = onEndCall, // permite cancelar enquanto chama
                     modifier = Modifier
@@ -509,12 +524,12 @@ fun SessionScreen(
                 ) {
                     Icon(Icons.Default.Phone, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("CHAMANDO...", fontWeight = FontWeight.SemiBold)
+                    Text("CONECTANDO...", fontWeight = FontWeight.SemiBold)
                 }
             }
 
             // 3) EM CHAMADA E CONECTADO — botão + chip de tempo
-            else /* calling && callIsConnected */ -> {
+            callIsConnected -> {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -555,6 +570,25 @@ fun SessionScreen(
                             Text(callTimer, color = timeChipText, fontWeight = FontWeight.SemiBold)
                         }
                     }
+                }
+            }
+
+            else -> {
+                Button(
+                    onClick = onEndCall,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(callPillHeight),
+                    shape = RoundedCornerShape(callPillRadius),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFEFF3FF),
+                        contentColor = infoBlue
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+                ) {
+                    Icon(Icons.Default.Phone, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("CHAMANDO...", fontWeight = FontWeight.SemiBold)
                 }
             }
         }

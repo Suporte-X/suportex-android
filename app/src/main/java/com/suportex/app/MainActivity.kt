@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.Manifest
 import android.media.projection.MediaProjectionManager
+import android.app.ActivityManager
 import android.os.Build
 import android.os.Bundle
 import android.os.BatteryManager
@@ -90,6 +91,7 @@ class MainActivity : ComponentActivity() {
     private var setCallConnectedFromSocket: ((Boolean) -> Unit)? = null
     private var setCallStateFromManager: ((CallState) -> Unit)? = null
     private var setCallDirectionFromManager: ((CallDirection?) -> Unit)? = null
+    private var setTechNameFromSocket: ((String) -> Unit)? = null
     private var setRecordingAudioFromActivity: ((Boolean) -> Unit)? = null
 
     private var currentSessionId: String? = null
@@ -440,13 +442,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
             "remote_disable", "remote_revoke" -> updateRemoteState(enabled = false, origin = "tech")
-            "call_start" -> {
-                val payload = obj.optJSONObject("payload")
-                val connected = payload?.optBoolean("connected")
-                    ?: obj.optBoolean("connected", true)
-                updateCallState(calling = true, connected = connected, origin = "tech")
-            }
-            "call_end" -> updateCallState(calling = false, connected = false, origin = "tech")
+            // A chamada agora é dirigida pelo VoiceCallManager (Firestore/WebRTC),
+            // evitando conflito de estado com comandos legados.
+            "call_start", "call_end" -> Unit
             "session_end", "end" -> handleSessionEnded(reason = obj.optString("reason", "Atendimento encerrado."))
         }
     }
@@ -573,6 +571,7 @@ class MainActivity : ComponentActivity() {
         remoteConsentAcceptedForCurrentSession = false
         Conn.sessionId = null
         Conn.techName = null
+        runOnUiThread { setTechNameFromSocket?.invoke("T\u00e9cnico") }
     }
 
     private fun handleSessionEnded(fromCommand: Boolean = true, reason: String? = null) {
@@ -661,6 +660,7 @@ class MainActivity : ComponentActivity() {
 
             Conn.sessionId = sid
             Conn.techName = tname
+            runOnUiThread { setTechNameFromSocket?.invoke(tname.ifBlank { "T\u00e9cnico" }) }
             currentSessionId = sid
             remoteConsentAcceptedForCurrentSession = false
             resetSessionState()
@@ -753,11 +753,21 @@ class MainActivity : ComponentActivity() {
             setSystemMessageFromLauncher?.invoke("Sessão ainda não aceita pelo técnico.")
             return
         }
+        if (isSharingActive && !isScreenCaptureServiceRunning()) {
+            updateSharingState(active = false, origin = "system")
+        }
         shareRequestFromCommand = fromCommand
         ensureRemoteAccessConsent {
             val intent = mediaProjectionManager.createScreenCaptureIntent()
             screenCaptureLauncher.launch(intent)
         }
+    }
+
+    private fun isScreenCaptureServiceRunning(): Boolean {
+        val manager = getSystemService(ActivityManager::class.java) ?: return false
+        @Suppress("DEPRECATION")
+        return manager.getRunningServices(Int.MAX_VALUE)
+            .any { it.service.className == ScreenCaptureService::class.java.name }
     }
 
     // -------- Screen share launcher --------
@@ -872,6 +882,7 @@ class MainActivity : ComponentActivity() {
                 var callConnected by remember { mutableStateOf(false) }
                 var callState by remember { mutableStateOf(CallState.IDLE) }
                 var callDirection by remember { mutableStateOf<CallDirection?>(null) }
+                var techName by remember { mutableStateOf("T\u00e9cnico") }
                 var systemMessage by remember { mutableStateOf<String?>(null) }
                 var isRecordingAudio by remember { mutableStateOf(false) }
 
@@ -909,6 +920,7 @@ class MainActivity : ComponentActivity() {
                     setCallConnectedFromSocket = { callConnected = it }
                     setCallStateFromManager = { callState = it }
                     setCallDirectionFromManager = { callDirection = it }
+                    setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
                     setRecordingAudioFromActivity = { isRecordingAudio = it }
                 }
 
@@ -955,6 +967,7 @@ class MainActivity : ComponentActivity() {
 
                         Screen.SESSION -> SessionScreen(
                             sessionId = sessionId,
+                            technicianName = techName,
                             isSharing = isSharing,
                             remoteEnabled = remoteEnabled,
                             calling = calling,
