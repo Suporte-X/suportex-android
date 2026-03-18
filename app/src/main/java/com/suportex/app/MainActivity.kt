@@ -422,15 +422,21 @@ class MainActivity : ComponentActivity() {
         val origin = obj.optString("from", "")
         when (obj.optString("type", "")) {
             "share_start" -> {
-                if (!isSharingActive && !origin.equals("client", ignoreCase = true)) {
-                    runOnUiThread {
+                if (!origin.equals("client", ignoreCase = true)) {
+                    val serviceRunning = isScreenCaptureServiceRunning()
+                    val shouldStartFlow = !isSharingActive || !serviceRunning
+                    if (isSharingActive && !serviceRunning) {
+                        updateSharingState(active = false, origin = "system")
+                    }
+                    if (shouldStartFlow) runOnUiThread {
                         setSystemMessageFromLauncher?.invoke("O técnico solicitou iniciar o compartilhamento de tela.")
                         startScreenShareFlow(fromCommand = true)
                     }
                 }
             }
             "share_stop" -> {
-                if (isSharingActive) runOnUiThread { stopScreenShare(fromCommand = true) }
+                val serviceRunning = isScreenCaptureServiceRunning()
+                if (isSharingActive || serviceRunning) runOnUiThread { stopScreenShare(fromCommand = true) }
             }
             "remote_enable" -> {
                 if (!remoteEnabledActive) {
