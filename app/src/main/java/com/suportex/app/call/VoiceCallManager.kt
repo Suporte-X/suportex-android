@@ -272,7 +272,11 @@ class VoiceCallManager(
             }
             CallDirection.TECH_TO_CLIENT -> {
                 if (localAccepted) {
-                    updateState(CallState.CONNECTING, direction)
+                    // Evita regressão de estado: uma chamada já conectada nunca deve
+                    // voltar para CONNECTING por novo snapshot "accepted".
+                    if (state != CallState.IN_CALL) {
+                        updateState(CallState.CONNECTING, direction)
+                    }
                     scheduleTimeout(cancelOnly = true)
                     startAnswererFlowIfReady(offerSdp)
                 }
@@ -381,7 +385,15 @@ class VoiceCallManager(
                     }
                 }
 
-                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) = Unit
+                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
+                    when (state) {
+                        PeerConnection.IceConnectionState.CONNECTED,
+                        PeerConnection.IceConnectionState.COMPLETED -> {
+                            updateState(CallState.IN_CALL, direction)
+                        }
+                        else -> Unit
+                    }
+                }
                 override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
                 override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) = Unit
                 override fun onSignalingChange(state: PeerConnection.SignalingState?) = Unit
