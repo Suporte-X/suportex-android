@@ -25,6 +25,13 @@ class AuthRepository {
         return uid ?: ""
     }
 
+    suspend fun ensureAnonIdToken(forceRefresh: Boolean = false): String {
+        val uid = ensureAnonAuth()
+        if (uid.isBlank()) return ""
+        val user = auth.currentUser ?: return ""
+        return user.getIdToken(forceRefresh).await().token ?: ""
+    }
+
     private suspend fun <T> Task<T>.await(): T =
         suspendCancellableCoroutine { cont ->
             addOnCompleteListener { task ->

@@ -617,9 +617,22 @@ class MainActivity : ComponentActivity() {
 
     // -------- Socket.IO --------
     private fun connectSocket() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = true) }.getOrDefault("")
+            runOnUiThread { connectSocketInternal(idToken) }
+        }
+    }
+
+    private fun connectSocketInternal(idToken: String) {
         val opts = IO.Options().apply {
             forceNew = true
             reconnection = true
+            if (idToken.isNotBlank()) {
+                extraHeaders = mapOf(
+                    "Authorization" to listOf("Bearer $idToken"),
+                    "x-id-token" to listOf(idToken)
+                )
+            }
             // server.js já tem allowEIO3: true
         }
         socket = IO.socket(Conn.SERVER_BASE, opts)
@@ -633,9 +646,8 @@ class MainActivity : ComponentActivity() {
 
         // cliente entrou na fila
         socket.on("support:enqueued") { args ->
-            val any  = args.getOrNull(0) ?: return@on
+            val any = args.getOrNull(0) ?: return@on
             val data = (any as? JSONObject) ?: return@on
-            // optString precisa de String default; usamos "" e depois tratamos vazio como null
             val reqId = data.optString("requestId", "").takeIf { it.isNotBlank() }
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
@@ -645,26 +657,32 @@ class MainActivity : ComponentActivity() {
             val data = args.getOrNull(0) as? JSONObject ?: return@on
             val sid = data.optString("sessionId", "")
             val tname = data.optString("techName", "Técnico")
-                if (sid.isNotBlank()) {
-                    Conn.sessionId = sid
-                    Conn.techName = tname
-                    currentSessionId = sid
-                    remoteConsentAcceptedForCurrentSession = false
-                    resetSessionState()
-                    voiceCallManager.bindSession(sid)
-                    registerSessionStart(sid, tname)
-                    pushSessionState()
-                    val joinPayload = JSONObject().apply {
-                        put("sessionId", sid)
-                        put("role", "client")
-                    }
-                    socket.emit("session:join", joinPayload)
-                    socket.emit("join", joinPayload)
-                    startTelemetryLoop()
-                    runOnUiThread {
-                        setSessionIdFromSocket?.invoke(sid)
-                        setScreenFromSocket?.invoke(Screen.SESSION)
-                    }
+            if (sid.isBlank()) return@on
+
+            Conn.sessionId = sid
+            Conn.techName = tname
+            currentSessionId = sid
+            remoteConsentAcceptedForCurrentSession = false
+            resetSessionState()
+            voiceCallManager.bindSession(sid)
+            registerSessionStart(sid, tname)
+            pushSessionState()
+
+            lifecycleScope.launch(Dispatchers.IO) {
+                val joinToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
+                val joinPayload = JSONObject().apply {
+                    put("sessionId", sid)
+                    put("role", "client")
+                    if (joinToken.isNotBlank()) put("idToken", joinToken)
+                }
+                socket.emit("session:join", joinPayload)
+                socket.emit("join", joinPayload)
+            }
+
+            startTelemetryLoop()
+            runOnUiThread {
+                setSessionIdFromSocket?.invoke(sid)
+                setScreenFromSocket?.invoke(Screen.SESSION)
             }
         }
 
@@ -690,6 +708,7 @@ class MainActivity : ComponentActivity() {
     private fun requestSupport() {
         lifecycleScope.launch(Dispatchers.IO) {
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+            val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
             if (uid.isNullOrBlank()) {
                 Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
                 runOnUiThread {
@@ -709,6 +728,7 @@ class MainActivity : ComponentActivity() {
                 })
                 put("clientUid", uid)
                 put("uid", uid)
+                if (idToken.isNotBlank()) put("idToken", idToken)
             }
             socket.emit("support:request", payload)
         }
