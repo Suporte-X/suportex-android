@@ -62,6 +62,7 @@ class ScreenCaptureService : Service() {
     private var eventsListener: ListenerRegistration? = null
     private var roomCode: String = ""
     private val handledEventIds = mutableSetOf<String>()
+    private var signalListenStartedAtMs: Long = 0L
 
     // Keep-alive
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -293,7 +294,24 @@ class ScreenCaptureService : Service() {
 
     private fun handleSignalAnswer(sdp: String) {
         if (sdp.isBlank()) return
-        peerConnection?.setRemoteDescription(
+        val pc = peerConnection ?: return
+        val signalingState = pc.signalingState()
+        if (signalingState == PeerConnection.SignalingState.CLOSED) {
+            Log.w(TAG, "ANSWER ignorada: PeerConnection fechada")
+            return
+        }
+        if (remoteDescriptionSet && signalingState == PeerConnection.SignalingState.STABLE) {
+            Log.d(TAG, "ANSWER duplicada ignorada (estado estável)")
+            return
+        }
+        if (
+            signalingState != PeerConnection.SignalingState.HAVE_LOCAL_OFFER &&
+            signalingState != PeerConnection.SignalingState.HAVE_REMOTE_PRANSWER
+        ) {
+            Log.w(TAG, "ANSWER ignorada por estado inválido: $signalingState")
+            return
+        }
+        pc.setRemoteDescription(
             object : SdpObserverAdapter() {
                 override fun onSetSuccess() {
                     Log.d(TAG, "ANSWER aplicada")
@@ -466,6 +484,7 @@ class ScreenCaptureService : Service() {
         if (sid.isBlank()) return
         eventsListener?.remove()
         handledEventIds.clear()
+        signalListenStartedAtMs = System.currentTimeMillis() - 2000L
         eventsListener = db.collection("sessions")
             .document(sid)
             .collection("events")
@@ -479,6 +498,10 @@ class ScreenCaptureService : Service() {
                     val type = doc.getString("type") ?: continue
                     val from = doc.getString("from") ?: ""
                     if (from == "client") continue
+                    val createdAtMs = doc.getTimestamp("createdAt")?.toDate()?.time
+                    if (createdAtMs != null && createdAtMs + 1000L < signalListenStartedAtMs) {
+                        continue
+                    }
                     when (type) {
                         "offer" -> {
                             val sdp = doc.getString("sdp") ?: ""
@@ -760,6 +783,10 @@ class ScreenCaptureService : Service() {
         peerConnection = null
         try { eventsListener?.remove() } catch (_: Exception) {}
         eventsListener = null
+        signalListenStartedAtMs = 0L
+        handledEventIds.clear()
+        remoteDescriptionSet = false
+        pendingRemoteIce.clear()
         try { eglBase?.release() } catch (_: Exception) {}
         eglBase = null
         started = false
