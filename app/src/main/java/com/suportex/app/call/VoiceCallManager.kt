@@ -67,6 +67,7 @@ class VoiceCallManager(
     private var callListener: ListenerRegistration? = null
     private var remoteIceListener: ListenerRegistration? = null
     private var timeoutJob: Job? = null
+    private var disconnectGraceJob: Job? = null
 
     private var peerConnection: PeerConnection? = null
     private var factory: PeerConnectionFactory? = null
@@ -322,6 +323,22 @@ class VoiceCallManager(
         }
     }
 
+    private fun scheduleDisconnectFail() {
+        disconnectGraceJob?.cancel()
+        disconnectGraceJob = scope.launch(Dispatchers.Main) {
+            delay(DISCONNECT_GRACE_MS)
+            val shouldFail = state == CallState.IN_CALL || state == CallState.CONNECTING
+            if (!shouldFail) return@launch
+            updateState(CallState.FAILED, direction, reason = "webrtc_disconnected")
+            cleanupCall()
+        }
+    }
+
+    private fun cancelDisconnectGrace() {
+        disconnectGraceJob?.cancel()
+        disconnectGraceJob = null
+    }
+
     private fun startOffererFlowIfReady() {
         if (offerSent) return
         ensurePeerConnection()
@@ -372,11 +389,16 @@ class VoiceCallManager(
                 override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
                     when (newState) {
                         PeerConnection.PeerConnectionState.CONNECTED -> {
+                            cancelDisconnectGrace()
                             Log.d(TAG, "CALL connected")
                             updateState(CallState.IN_CALL, direction)
                         }
-                        PeerConnection.PeerConnectionState.DISCONNECTED,
+                        PeerConnection.PeerConnectionState.DISCONNECTED -> {
+                            Log.w(TAG, "CALL disconnected (grace)")
+                            scheduleDisconnectFail()
+                        }
                         PeerConnection.PeerConnectionState.FAILED -> {
+                            cancelDisconnectGrace()
                             Log.w(TAG, "CALL disconnected")
                             updateState(CallState.FAILED, direction, reason = "webrtc_failed")
                             cleanupCall()
@@ -389,6 +411,7 @@ class VoiceCallManager(
                     when (state) {
                         PeerConnection.IceConnectionState.CONNECTED,
                         PeerConnection.IceConnectionState.COMPLETED -> {
+                            cancelDisconnectGrace()
                             updateState(CallState.IN_CALL, direction)
                         }
                         else -> Unit
@@ -622,6 +645,7 @@ class VoiceCallManager(
     }
 
     private fun cleanupCall() {
+        cancelDisconnectGrace()
         currentCallId = null
         localAccepted = false
         offerSent = false
@@ -644,6 +668,7 @@ class VoiceCallManager(
     }
 
     private fun cleanupPeerConnection() {
+        cancelDisconnectGrace()
         remoteIceListener?.remove()
         remoteIceListener = null
         peerConnection?.close()
@@ -688,5 +713,6 @@ class VoiceCallManager(
     private companion object {
         const val TAG = "SXS/Call"
         const val TIMEOUT_MS = 20_000L
+        const val DISCONNECT_GRACE_MS = 10_000L
     }
 }
