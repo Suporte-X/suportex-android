@@ -71,7 +71,6 @@ dependencies {
     // --- NOVO: Firebase (use BOM para alinhar versões) ---
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-firestore-ktx")
-    implementation("com.google.firebase:firebase-storage-ktx")
     implementation("com.google.firebase:firebase-messaging-ktx")
     // (opcional) se quiser auth anônima para separar usuários
     implementation("com.google.firebase:firebase-auth-ktx")
