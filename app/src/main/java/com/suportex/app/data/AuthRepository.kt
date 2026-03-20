@@ -2,7 +2,6 @@ package com.suportex.app.data
 
 import android.util.Log
 import com.google.android.gms.tasks.Task
-import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -12,16 +11,16 @@ class AuthRepository {
     private val auth: FirebaseAuth = FirebaseAuth.getInstance()
 
     suspend fun ensureAnonAuth(): String {
-        val projectId = FirebaseApp.getInstance().options.projectId
         val currentUid = auth.currentUser?.uid
-        Log.d(TAG, "Firebase projectId=$projectId")
-        Log.d(TAG, "AUTH state: currentUser=$currentUid")
-        if (currentUid != null) {
+        if (!currentUid.isNullOrBlank()) {
             return currentUid
         }
         val result = auth.signInAnonymously().await()
         val uid = result.user?.uid ?: auth.currentUser?.uid
-        Log.d(TAG, "AUTH state: currentUser=$uid")
+        if (!uid.isNullOrBlank() && uid != lastLoggedUid) {
+            Log.i(TAG, "Sessao anonima autenticada")
+            lastLoggedUid = uid
+        }
         return uid ?: ""
     }
 
@@ -45,5 +44,7 @@ class AuthRepository {
 
     private companion object {
         const val TAG = "SXS/Auth"
+        @Volatile
+        private var lastLoggedUid: String? = null
     }
 }
