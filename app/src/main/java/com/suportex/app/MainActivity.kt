@@ -1,7 +1,8 @@
-package com.suportex.app
+﻿package com.suportex.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.IntentFilter
@@ -36,6 +37,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
+import com.suportex.app.data.ClientIdentityStore
+import com.suportex.app.data.ClientSupportRepository
+import com.suportex.app.data.FirebasePhoneIdentityProvider
+import com.suportex.app.data.SupportBillingConfig
 import com.suportex.app.data.model.Message
 import com.suportex.app.data.AuthRepository
 import com.suportex.app.data.SessionClientInfo
@@ -43,13 +48,23 @@ import com.suportex.app.data.SessionRepository
 import com.suportex.app.data.SessionState
 import com.suportex.app.data.SessionTelemetry
 import com.suportex.app.data.SessionTechInfo
+import com.suportex.app.data.model.ClientHomeSnapshot
+import com.suportex.app.data.model.ClientRecord
+import com.suportex.app.data.model.CreditPackageRecord
+import com.suportex.app.data.model.SupportAccessDecision
+import com.suportex.app.data.model.SupportStartContext
 import com.suportex.app.call.CallDirection
 import com.suportex.app.call.CallState
 import com.suportex.app.call.CallUiUpdate
 import com.suportex.app.call.VoiceCallManager
 import com.suportex.app.remote.AccessibilityUtils
 import com.suportex.app.remote.RemoteCommandBus
+import com.suportex.app.ui.screens.CardPlaceholderScreen
+import com.suportex.app.ui.screens.PhoneIdentityDialog
+import com.suportex.app.ui.screens.PixPlaceholderScreen
+import com.suportex.app.ui.screens.PurchaseCreditsScreen
 import com.suportex.app.ui.screens.SessionScreen
+import com.suportex.app.ui.screens.SupportHomeScreen
 import io.socket.client.IO
 import io.socket.client.Socket
 import okhttp3.*
@@ -59,6 +74,7 @@ import android.net.Uri
 import android.media.MediaRecorder
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,19 +82,22 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION }
+enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION, PURCHASE_CREDITS, PAYMENT_CARD, PAYMENT_PIX }
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
 
-    // (mantido só para cancelar request por HTTP, se desejar)
+    // (mantido sÃ³ para cancelar request por HTTP, se desejar)
     private val http = OkHttpClient()
 
     private val sessionRepository = SessionRepository()
     private val authRepository = AuthRepository()
+    private val clientSupportRepository = ClientSupportRepository()
+    private val phoneIdentityProvider = FirebasePhoneIdentityProvider()
+    private lateinit var clientIdentityStore: ClientIdentityStore
 
-    // Bridges Activity -> Compose (já existiam)
+    // Bridges Activity -> Compose (jÃ¡ existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
     private var setSystemMessageFromLauncher: ((String?) -> Unit)? = null
 
@@ -108,6 +127,9 @@ class MainActivity : ComponentActivity() {
     private var pendingAudioAction: (() -> Unit)? = null
     private var mediaRecorder: MediaRecorder? = null
     private var audioTempFile: File? = null
+    private var pendingSupportStartContext: SupportStartContext? = null
+    private var pendingSupportSessionId: String? = null
+    private var pendingClientRecord: ClientRecord? = null
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -191,7 +213,7 @@ class MainActivity : ComponentActivity() {
                 sessionRepository.bindClient(sessionId)
                 sessionRepository.startSession(sessionId, clientInfo, techInfo)
             }.onFailure { err ->
-                Log.e("SXS/Main", "Falha ao registrar início da sessão $sessionId", err)
+                Log.e("SXS/Main", "Falha ao registrar inÃ­cio da sessÃ£o $sessionId", err)
             }
         }
     }
@@ -226,23 +248,23 @@ class MainActivity : ComponentActivity() {
         }
 
         val message = """
-            Para que o suporte técnico possa ser realizado, o aplicativo Suporte X pode solicitar permissões temporárias como:
+            Para que o suporte tÃ©cnico possa ser realizado, o aplicativo Suporte X pode solicitar permissÃµes temporÃ¡rias como:
             
-            • compartilhamento de tela
-            • acesso assistido ao dispositivo
-            • envio de arquivos e informações técnicas
+            â€¢ compartilhamento de tela
+            â€¢ acesso assistido ao dispositivo
+            â€¢ envio de arquivos e informaÃ§Ãµes tÃ©cnicas
             
-            Essas permissões são utilizadas exclusivamente durante a sessão de suporte técnico.
+            Essas permissÃµes sÃ£o utilizadas exclusivamente durante a sessÃ£o de suporte tÃ©cnico.
             
-            O acesso remoto somente será iniciado após sua autorização explícita e pode ser interrompido a qualquer momento diretamente no aplicativo.
+            O acesso remoto somente serÃ¡ iniciado apÃ³s sua autorizaÃ§Ã£o explÃ­cita e pode ser interrompido a qualquer momento diretamente no aplicativo.
             
-            Nenhuma ação será realizada no dispositivo sem a autorização do usuário.
+            Nenhuma aÃ§Ã£o serÃ¡ realizada no dispositivo sem a autorizaÃ§Ã£o do usuÃ¡rio.
             
-            Ao continuar, você confirma que está solicitando suporte técnico e autoriza temporariamente o acesso necessário para a realização do atendimento.
+            Ao continuar, vocÃª confirma que estÃ¡ solicitando suporte tÃ©cnico e autoriza temporariamente o acesso necessÃ¡rio para a realizaÃ§Ã£o do atendimento.
         """.trimIndent()
 
         android.app.AlertDialog.Builder(this)
-            .setTitle("Autorização de Acesso Remoto")
+            .setTitle("AutorizaÃ§Ã£o de Acesso Remoto")
             .setMessage(message)
             .setCancelable(true)
             .setNegativeButton("Cancelar") { dialog, _ ->
@@ -262,7 +284,7 @@ class MainActivity : ComponentActivity() {
                 if (!isAccessibilityServiceEnabled()) {
                     openAccessibilitySettings()
                     setSystemMessageFromLauncher?.invoke(
-                        "Ative em Acessibilidade → SuporteX → Ativar para permitir o controle remoto."
+                        "Ative em Acessibilidade â†’ SuporteX â†’ Ativar para permitir o controle remoto."
                     )
                 }
                 updateRemoteState(enabled = true, origin = "client")
@@ -429,7 +451,7 @@ class MainActivity : ComponentActivity() {
                         updateSharingState(active = false, origin = "system")
                     }
                     if (shouldStartFlow) runOnUiThread {
-                        setSystemMessageFromLauncher?.invoke("O técnico solicitou iniciar o compartilhamento de tela.")
+                        setSystemMessageFromLauncher?.invoke("O tÃ©cnico solicitou iniciar o compartilhamento de tela.")
                         startScreenShareFlow(fromCommand = true)
                     }
                 }
@@ -442,13 +464,13 @@ class MainActivity : ComponentActivity() {
                 if (!remoteEnabledActive) {
                     runOnUiThread {
                         setSystemMessageFromLauncher?.invoke(
-                            "O técnico solicitou acesso remoto. Ative \"Permitir Acesso Remoto\" para continuar."
+                            "O tÃ©cnico solicitou acesso remoto. Ative \"Permitir Acesso Remoto\" para continuar."
                         )
                     }
                 }
             }
             "remote_disable", "remote_revoke" -> updateRemoteState(enabled = false, origin = "tech")
-            // A chamada agora é dirigida pelo VoiceCallManager (Firestore/WebRTC),
+            // A chamada agora Ã© dirigida pelo VoiceCallManager (Firestore/WebRTC),
             // evitando conflito de estado com comandos legados.
             "call_start", "call_end" -> Unit
             "session_end", "end" -> handleSessionEnded(reason = obj.optString("reason", "Atendimento encerrado."))
@@ -484,7 +506,7 @@ class MainActivity : ComponentActivity() {
     private fun handleAttachmentPick(uri: Uri) {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
-            setSystemMessageFromLauncher?.invoke("Sessão ainda não aceita pelo técnico.")
+            setSystemMessageFromLauncher?.invoke("SessÃ£o ainda nÃ£o aceita pelo tÃ©cnico.")
             return
         }
         lifecycleScope.launch(Dispatchers.IO) {
@@ -504,7 +526,7 @@ class MainActivity : ComponentActivity() {
     private fun startAudioRecording() {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
-            setSystemMessageFromLauncher?.invoke("Sessão ainda não aceita pelo técnico.")
+            setSystemMessageFromLauncher?.invoke("SessÃ£o ainda nÃ£o aceita pelo tÃ©cnico.")
             return
         }
         runCatching {
@@ -522,12 +544,12 @@ class MainActivity : ComponentActivity() {
             }
             mediaRecorder = recorder
             setRecordingAudioFromActivity?.invoke(true)
-            setSystemMessageFromLauncher?.invoke("Gravando áudio… Toque novamente para enviar.")
+            setSystemMessageFromLauncher?.invoke("Gravando Ã¡udioâ€¦ Toque novamente para enviar.")
         }.onFailure {
             mediaRecorder = null
             audioTempFile = null
             setRecordingAudioFromActivity?.invoke(false)
-            setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravação de áudio.")
+            setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravaÃ§Ã£o de Ã¡udio.")
         }
     }
 
@@ -549,7 +571,7 @@ class MainActivity : ComponentActivity() {
 
         val file = outFile
         if (file == null || !file.exists()) {
-            setSystemMessageFromLauncher?.invoke("Arquivo de áudio não encontrado.")
+            setSystemMessageFromLauncher?.invoke("Arquivo de Ã¡udio nÃ£o encontrado.")
             return
         }
 
@@ -559,9 +581,9 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread {
                 if (result.isSuccess) {
-                    setSystemMessageFromLauncher?.invoke("Áudio enviado.")
+                    setSystemMessageFromLauncher?.invoke("Ãudio enviado.")
                 } else {
-                    setSystemMessageFromLauncher?.invoke("Falha ao enviar áudio.")
+                    setSystemMessageFromLauncher?.invoke("Falha ao enviar Ã¡udio.")
                 }
             }
             runCatching { file.delete() }
@@ -589,6 +611,18 @@ class MainActivity : ComponentActivity() {
             logSessionEvent("end", origin = origin, extras = mapOf("reason" to reason))
             lifecycleScope.launch(Dispatchers.IO) {
                 runCatching { sessionRepository.markSessionClosed(it) }
+                runCatching {
+                    clientSupportRepository.completeSupportSession(
+                        localSupportSessionId = pendingSupportSessionId,
+                        realtimeSessionId = it,
+                        techId = null,
+                        techName = Conn.techName,
+                        problemSummary = reason,
+                        solutionSummary = null,
+                        internalNotes = "Encerrado via app Android ($origin)",
+                        reportSummary = reason
+                    )
+                }
             }
         }
 
@@ -611,6 +645,9 @@ class MainActivity : ComponentActivity() {
         }
 
         shareRequestFromCommand = false
+        pendingSupportStartContext = null
+        pendingSupportSessionId = null
+        pendingClientRecord = null
         finalizeSession()
         runOnUiThread {
             setRequestIdFromSocket?.invoke(null)
@@ -638,7 +675,7 @@ class MainActivity : ComponentActivity() {
                     "x-id-token" to listOf(idToken)
                 )
             }
-            // server.js já tem allowEIO3: true
+            // server.js jÃ¡ tem allowEIO3: true
         }
         socket = IO.socket(Conn.SERVER_BASE, opts)
         Conn.socket = socket
@@ -657,11 +694,11 @@ class MainActivity : ComponentActivity() {
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
 
-        // técnico aceitou → recebemos sessionId e (opcional) techName
+        // tÃ©cnico aceitou â†’ recebemos sessionId e (opcional) techName
         socket.on("support:accepted") { args ->
             val data = args.getOrNull(0) as? JSONObject ?: return@on
             val sid = data.optString("sessionId", "")
-            val tname = data.optString("techName", "Técnico")
+            val tname = data.optString("techName", "TÃ©cnico")
             if (sid.isBlank()) return@on
 
             Conn.sessionId = sid
@@ -672,6 +709,15 @@ class MainActivity : ComponentActivity() {
             resetSessionState()
             voiceCallManager.bindSession(sid)
             registerSessionStart(sid, tname)
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching {
+                    clientSupportRepository.attachRealtimeSession(
+                        localSupportSessionId = pendingSupportSessionId,
+                        realtimeSessionId = sid,
+                        techName = tname
+                    )
+                }
+            }
             pushSessionState()
 
             lifecycleScope.launch(Dispatchers.IO) {
@@ -710,8 +756,53 @@ class MainActivity : ComponentActivity() {
         socket.connect()
     }
 
-    // Disparar pedido de suporte
-    private fun requestSupport() {
+    private fun loadHomeSnapshot(
+        rawPhone: String?,
+        onResult: (ClientHomeSnapshot) -> Unit
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val firebasePhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
+            val effectivePhone = rawPhone?.takeIf { it.isNotBlank() } ?: firebasePhone
+            val snapshot = runCatching {
+                clientSupportRepository.seedDefaultPackagesIfNeeded()
+                clientSupportRepository.loadHomeSnapshot(effectivePhone)
+            }.getOrElse {
+                ClientHomeSnapshot(
+                    phone = effectivePhone,
+                    client = null,
+                    clientMeta = null,
+                    packages = SupportBillingConfig.defaultCreditPackages
+                )
+            }
+            runOnUiThread { onResult(snapshot) }
+        }
+    }
+
+    private fun evaluateSupportEntry(
+        rawPhone: String,
+        displayName: String?,
+        onDecision: (SupportAccessDecision) -> Unit
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val decision = runCatching {
+                clientSupportRepository.seedDefaultPackagesIfNeeded()
+                clientSupportRepository.evaluateSupportAccess(rawPhone = rawPhone, displayName = displayName)
+            }.getOrElse {
+                Log.e("SXS/Main", "Falha ao verificar acesso de suporte", it)
+                SupportAccessDecision.NeedsPhone
+            }
+            if (decision is SupportAccessDecision.Allowed) {
+                pendingSupportStartContext = decision.startContext
+                pendingClientRecord = decision.client
+            }
+            runOnUiThread { onDecision(decision) }
+        }
+    }
+
+    private fun requestSupport(
+        startContext: SupportStartContext,
+        clientName: String?
+    ) {
         lifecycleScope.launch(Dispatchers.IO) {
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
@@ -719,12 +810,26 @@ class MainActivity : ComponentActivity() {
                 Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
                 runOnUiThread {
                     setScreenFromSocket?.invoke(Screen.HOME)
-                    setSystemMessageFromLauncher?.invoke("Falha de autenticação. Tente novamente em alguns segundos.")
+                    setSystemMessageFromLauncher?.invoke("Falha de autenticacao. Tente novamente em alguns segundos.")
                 }
                 return@launch
             }
+
+            pendingSupportSessionId = runCatching {
+                clientSupportRepository.registerSupportRequest(
+                    startContext = startContext,
+                    clientName = clientName,
+                    clientUid = uid,
+                    deviceBrand = Build.BRAND,
+                    deviceModel = Build.MODEL,
+                    androidVersion = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
+                )
+            }.getOrNull()
+
             val payload = JSONObject().apply {
-                put("clientName", "Android ${Build.MODEL ?: ""}".trim())
+                put("clientName", clientName ?: "Cliente")
+                put("clientPhone", startContext.phone)
+                put("clientId", startContext.clientId)
                 put("brand", Build.BRAND ?: "Android")
                 put("model", Build.MODEL ?: "")
                 put("device", JSONObject().apply {
@@ -734,14 +839,89 @@ class MainActivity : ComponentActivity() {
                 })
                 put("clientUid", uid)
                 put("uid", uid)
+                put("supportProfile", JSONObject().apply {
+                    put("isNewClient", startContext.isNewClient)
+                    put("isFreeFirstSupport", startContext.isFreeFirstSupport)
+                    put("creditsToConsume", startContext.creditsToConsume)
+                    put("localSupportSessionId", pendingSupportSessionId)
+                })
                 if (idToken.isNotBlank()) put("idToken", idToken)
             }
             socket.emit("support:request", payload)
         }
     }
 
-    // Cancelar (opcional) – pelo endpoint HTTP do servidor
+    private fun requestCreditPurchaseByWhatsapp(
+        selectedPackage: CreditPackageRecord?,
+        currentClientId: String?
+    ) {
+        if (selectedPackage == null) {
+            setSystemMessageFromLauncher?.invoke("Escolha um plano primeiro.")
+            return
+        }
+        val text = "Ola, quero comprar creditos no Suporte X. " +
+            "Plano escolhido: ${selectedPackage.name} por ${formatPriceLabel(selectedPackage.priceCents)}."
+        val encoded = URLEncoder.encode(text, Charsets.UTF_8.name())
+        val url = "https://wa.me/${SupportBillingConfig.OFFICIAL_WHATSAPP_NUMBER}?text=$encoded"
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        try {
+            startActivity(intent)
+            if (!currentClientId.isNullOrBlank()) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        clientSupportRepository.registerCreditOrderIntent(
+                            clientId = currentClientId,
+                            packageId = selectedPackage.id,
+                            paymentMethod = "whatsapp",
+                            whatsappRequested = true,
+                            pixPlaceholder = false,
+                            cardPlaceholder = false
+                        )
+                    }
+                }
+            }
+        } catch (_: ActivityNotFoundException) {
+            setSystemMessageFromLauncher?.invoke("Nao foi possivel abrir o WhatsApp neste dispositivo.")
+        }
+    }
+
+    private fun registerPlaceholderOrder(
+        currentClientId: String?,
+        selectedPackage: CreditPackageRecord?,
+        method: String
+    ) {
+        if (currentClientId.isNullOrBlank() || selectedPackage == null) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                clientSupportRepository.registerCreditOrderIntent(
+                    clientId = currentClientId,
+                    packageId = selectedPackage.id,
+                    paymentMethod = method,
+                    whatsappRequested = false,
+                    pixPlaceholder = method == "pix",
+                    cardPlaceholder = method == "card"
+                )
+            }
+        }
+    }
+
+    private fun formatPriceLabel(priceCents: Int): String {
+        val reais = priceCents / 100
+        val cents = (priceCents % 100).toString().padStart(2, '0')
+        return "R$ $reais,$cents"
+    }
+
+    // Cancelar (opcional) â€“ pelo endpoint HTTP do servidor
     private fun cancelRequest(requestId: String, onDone: () -> Unit = {}) {
+        val localSupportId = pendingSupportSessionId
+        if (!localSupportId.isNullOrBlank()) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
+            }
+        }
+        pendingSupportSessionId = null
+        pendingSupportStartContext = null
+
         val req = Request.Builder()
             .url("${Conn.SERVER_BASE}/api/requests/$requestId")
             .delete()
@@ -756,7 +936,7 @@ class MainActivity : ComponentActivity() {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
             shareRequestFromCommand = false
-            setSystemMessageFromLauncher?.invoke("Sessão ainda não aceita pelo técnico.")
+            setSystemMessageFromLauncher?.invoke("SessÃ£o ainda nÃ£o aceita pelo tÃ©cnico.")
             return
         }
         if (isSharingActive && !isScreenCaptureServiceRunning()) {
@@ -782,7 +962,7 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == RESULT_OK && result.data != null) {
                 val sid = currentSessionId
                 if (sid.isNullOrBlank()) {
-                    setSystemMessageFromLauncher?.invoke("Sessão ainda não aceita pelo técnico.")
+                    setSystemMessageFromLauncher?.invoke("SessÃ£o ainda nÃ£o aceita pelo tÃ©cnico.")
                     return@registerForActivityResult
                 }
                 val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
@@ -796,7 +976,7 @@ class MainActivity : ComponentActivity() {
                 updateSharingState(active = true, origin = origin)
                 shareRequestFromCommand = false
             } else {
-                setSystemMessageFromLauncher?.invoke("Permissão de captura negada.")
+                setSystemMessageFromLauncher?.invoke("PermissÃ£o de captura negada.")
                 shareRequestFromCommand = false
             }
         }
@@ -826,7 +1006,7 @@ class MainActivity : ComponentActivity() {
                 pendingAudioAction = null
             } else {
                 pendingAudioAction = null
-                setSystemMessageFromLauncher?.invoke("Permissão de microfone negada.")
+                setSystemMessageFromLauncher?.invoke("PermissÃ£o de microfone negada.")
             }
         }
 
@@ -848,6 +1028,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        clientIdentityStore = ClientIdentityStore(this)
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { clientSupportRepository.seedDefaultPackagesIfNeeded() }
+        }
         mediaProjectionManager = getSystemService(MediaProjectionManager::class.java)
 
         voiceCallManager = VoiceCallManager(
@@ -856,7 +1040,7 @@ class MainActivity : ComponentActivity() {
             onUpdate = ::handleCallUpdate
         )
 
-        connectSocket() // 🔌 conecta o Socket.IO assim que abrir o app
+        connectSocket() // ðŸ”Œ conecta o Socket.IO assim que abrir o app
 
         setContent {
             val brandPrimary = Color(0xFFFFCB19)
@@ -891,14 +1075,42 @@ class MainActivity : ComponentActivity() {
                 var techName by remember { mutableStateOf("T\u00e9cnico") }
                 var systemMessage by remember { mutableStateOf<String?>(null) }
                 var isRecordingAudio by remember { mutableStateOf(false) }
+                var homeSnapshot by remember {
+                    mutableStateOf(
+                        ClientHomeSnapshot(
+                            phone = null,
+                            client = null,
+                            clientMeta = null,
+                            packages = SupportBillingConfig.defaultCreditPackages
+                        )
+                    )
+                }
+                var selectedPackage by remember { mutableStateOf<CreditPackageRecord?>(null) }
+                var showIdentityDialog by remember { mutableStateOf(false) }
+                var identityPhone by remember { mutableStateOf(clientIdentityStore.getPhone().orEmpty()) }
+                var identityName by remember { mutableStateOf(clientIdentityStore.getDisplayName().orEmpty()) }
 
                 BackHandler {
                     when (current) {
                         Screen.HELP -> current = Screen.HOME
                         Screen.PRIVACY -> current = Screen.HOME
                         Screen.TERMS -> current = Screen.HOME
+                        Screen.PURCHASE_CREDITS -> current = Screen.HOME
+                        Screen.PAYMENT_CARD -> current = Screen.PURCHASE_CREDITS
+                        Screen.PAYMENT_PIX -> current = Screen.PURCHASE_CREDITS
                         Screen.WAITING -> {
-                            requestId?.let { cancelRequest(it) }
+                            if (requestId != null) {
+                                cancelRequest(requestId!!)
+                            } else {
+                                val localSupportId = pendingSupportSessionId
+                                if (!localSupportId.isNullOrBlank()) {
+                                    lifecycleScope.launch(Dispatchers.IO) {
+                                        runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
+                                    }
+                                }
+                                pendingSupportSessionId = null
+                                pendingSupportStartContext = null
+                            }
                             requestId = null
                             sessionId = null
                             currentSessionId = null
@@ -928,15 +1140,65 @@ class MainActivity : ComponentActivity() {
                     setCallDirectionFromManager = { callDirection = it }
                     setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
                     setRecordingAudioFromActivity = { isRecordingAudio = it }
+                    loadHomeSnapshot(identityPhone) { snapshot ->
+                        homeSnapshot = snapshot
+                        if (selectedPackage == null) {
+                            selectedPackage = snapshot.packages.firstOrNull()
+                        }
+                    }
                 }
 
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     when (current) {
-                        Screen.HOME -> HomeScreen(
+                        Screen.HOME -> SupportHomeScreen(
+                            homeSnapshot = homeSnapshot,
                             onRequestSupport = {
-                                // Vai para esperando e dispara o evento de suporte
-                                current = Screen.WAITING
-                                requestSupport()
+                                if (identityPhone.isBlank()) {
+                                    showIdentityDialog = true
+                                    systemMessage = "Informe seu telefone para continuar."
+                                } else {
+                                    evaluateSupportEntry(identityPhone, identityName.ifBlank { null }) { decision ->
+                                        when (decision) {
+                                            is SupportAccessDecision.Allowed -> {
+                                                current = Screen.WAITING
+                                                requestSupport(
+                                                    startContext = decision.startContext,
+                                                    clientName = identityName.ifBlank {
+                                                        decision.client.name ?: "Cliente"
+                                                    }
+                                                )
+                                                loadHomeSnapshot(identityPhone) { snapshot ->
+                                                    homeSnapshot = snapshot
+                                                    selectedPackage = selectedPackage
+                                                        ?: snapshot.packages.firstOrNull()
+                                                }
+                                            }
+
+                                            is SupportAccessDecision.BlockedNeedsCredit -> {
+                                                homeSnapshot = homeSnapshot.copy(
+                                                    phone = identityPhone,
+                                                    client = decision.client,
+                                                    clientMeta = homeSnapshot.clientMeta,
+                                                    packages = decision.packages
+                                                )
+                                                selectedPackage = decision.packages.firstOrNull()
+                                                systemMessage = "Sem creditos disponiveis. Escolha um plano."
+                                                current = Screen.PURCHASE_CREDITS
+                                            }
+
+                                            SupportAccessDecision.NeedsPhone -> {
+                                                showIdentityDialog = true
+                                                systemMessage = "Informe seu telefone para continuar."
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            onOpenPurchase = {
+                                if (selectedPackage == null) {
+                                    selectedPackage = homeSnapshot.packages.firstOrNull()
+                                }
+                                current = Screen.PURCHASE_CREDITS
                             },
                             onOpenHelp = { current = Screen.HELP },
                             onOpenPrivacy = { current = Screen.PRIVACY },
@@ -959,15 +1221,64 @@ class MainActivity : ComponentActivity() {
                             textMuted = Color(0xFF8A8A8E)
                         )
 
+                        Screen.PURCHASE_CREDITS -> PurchaseCreditsScreen(
+                            plans = homeSnapshot.packages,
+                            selectedPackageId = selectedPackage?.id,
+                            onSelectPlan = { selectedPackage = it },
+                            onBack = { current = Screen.HOME },
+                            onPayCard = {
+                                registerPlaceholderOrder(
+                                    currentClientId = homeSnapshot.client?.id,
+                                    selectedPackage = selectedPackage,
+                                    method = "card"
+                                )
+                                current = Screen.PAYMENT_CARD
+                            },
+                            onPayPix = {
+                                registerPlaceholderOrder(
+                                    currentClientId = homeSnapshot.client?.id,
+                                    selectedPackage = selectedPackage,
+                                    method = "pix"
+                                )
+                                current = Screen.PAYMENT_PIX
+                            },
+                            onBuyWhatsapp = {
+                                requestCreditPurchaseByWhatsapp(
+                                    selectedPackage = selectedPackage,
+                                    currentClientId = homeSnapshot.client?.id
+                                )
+                            }
+                        )
+
+                        Screen.PAYMENT_CARD -> CardPlaceholderScreen(
+                            onBack = { current = Screen.PURCHASE_CREDITS }
+                        )
+
+                        Screen.PAYMENT_PIX -> PixPlaceholderScreen(
+                            selectedPlan = selectedPackage,
+                            onBack = { current = Screen.PURCHASE_CREDITS }
+                        )
+
                         Screen.WAITING -> WaitingScreen(
                             onCancel = {
-                                requestId?.let { cancelRequest(it) }
+                                if (requestId != null) {
+                                    cancelRequest(requestId!!)
+                                } else {
+                                    val localSupportId = pendingSupportSessionId
+                                    if (!localSupportId.isNullOrBlank()) {
+                                        lifecycleScope.launch(Dispatchers.IO) {
+                                            runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
+                                        }
+                                    }
+                                    pendingSupportSessionId = null
+                                    pendingSupportStartContext = null
+                                }
                                 requestId = null
                                 sessionId = null
                                 currentSessionId = null
                                 current = Screen.HOME
                             },
-                            onAccepted = { /* não usamos; aceitação vem do socket */ },
+                            onAccepted = { /* nÃ£o usamos; aceitaÃ§Ã£o vem do socket */ },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -1004,7 +1315,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onAttachmentClick = {
                                 if (sessionId == null) {
-                                    systemMessage = "Sessão ainda não aceita pelo técnico."
+                                    systemMessage = "SessÃ£o ainda nÃ£o aceita pelo tÃ©cnico."
                                 } else {
                                     attachmentPickerLauncher.launch("image/*")
                                 }
@@ -1020,6 +1331,57 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+
+                PhoneIdentityDialog(
+                    show = showIdentityDialog,
+                    initialPhone = identityPhone,
+                    initialName = identityName,
+                    onDismiss = { showIdentityDialog = false },
+                    onConfirm = { phone, name ->
+                        val sanitizedPhone = phone.trim()
+                        if (sanitizedPhone.isBlank()) {
+                            systemMessage = "Informe seu telefone para continuar."
+                        } else {
+                            identityPhone = sanitizedPhone
+                            identityName = name.orEmpty()
+                            clientIdentityStore.save(
+                                phone = sanitizedPhone,
+                                displayName = name
+                            )
+                            showIdentityDialog = false
+                            loadHomeSnapshot(sanitizedPhone) { snapshot ->
+                                homeSnapshot = snapshot
+                                selectedPackage = snapshot.packages.firstOrNull()
+                            }
+                            evaluateSupportEntry(sanitizedPhone, name) { decision ->
+                                when (decision) {
+                                    is SupportAccessDecision.Allowed -> {
+                                        current = Screen.WAITING
+                                        requestSupport(
+                                            startContext = decision.startContext,
+                                            clientName = name ?: decision.client.name
+                                        )
+                                    }
+
+                                    is SupportAccessDecision.BlockedNeedsCredit -> {
+                                        homeSnapshot = homeSnapshot.copy(
+                                            phone = sanitizedPhone,
+                                            client = decision.client,
+                                            clientMeta = homeSnapshot.clientMeta,
+                                            packages = decision.packages
+                                        )
+                                        selectedPackage = decision.packages.firstOrNull()
+                                        current = Screen.PURCHASE_CREDITS
+                                    }
+
+                                    SupportAccessDecision.NeedsPhone -> {
+                                        systemMessage = "Telefone invalido. Verifique e tente novamente."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
             }
         }
     }
@@ -1061,7 +1423,7 @@ private fun HomeScreen(
             shape = RoundedCornerShape(20.dp)
         ) { Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(16.dp))
-        Text("Tempo médio de atendimento: 2–5 min", color = textMuted, fontSize = 16.sp)
+        Text("Tempo mÃ©dio de atendimento: 2â€“5 min", color = textMuted, fontSize = 16.sp)
         Spacer(Modifier.weight(1f))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1069,12 +1431,12 @@ private fun HomeScreen(
                 modifier = Modifier.clickable {
                     onOpenHelp()
                 })
-            Text("  ·  ", color = textMuted)
+            Text("  Â·  ", color = textMuted)
             Text("Privacidade", color = textMuted,
                 modifier = Modifier.clickable {
                     onOpenPrivacy()
                 })
-            Text("  ·  ", color = textMuted)
+            Text("  Â·  ", color = textMuted)
             Text("Termos", color = textMuted,
                 modifier = Modifier.clickable {
                     onOpenTerms()
@@ -1099,14 +1461,14 @@ private fun HelpScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("âœ•", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
         Text("Ajuda", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Guia rápido de atendimento", color = textMuted, fontSize = 13.sp)
+        Text("Guia rÃ¡pido de atendimento", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1116,27 +1478,27 @@ private fun HelpScreen(
         ) {
             PolicySection(
                 title = "1. Como iniciar um atendimento",
-                body = "Toque em SOLICITAR SUPORTE e aguarde a conexão com um técnico. Quando o atendimento for aceito, a sessão será aberta automaticamente no aplicativo."
+                body = "Toque em SOLICITAR SUPORTE e aguarde a conexÃ£o com um tÃ©cnico. Quando o atendimento for aceito, a sessÃ£o serÃ¡ aberta automaticamente no aplicativo."
             )
             PolicySection(
-                title = "2. Permissões durante o suporte",
-                body = "Alguns atendimentos podem exigir permissões temporárias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissões são opcionais e você controla todas elas no app."
+                title = "2. PermissÃµes durante o suporte",
+                body = "Alguns atendimentos podem exigir permissÃµes temporÃ¡rias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissÃµes sÃ£o opcionais e vocÃª controla todas elas no app."
             )
             PolicySection(
-                title = "3. Segurança da sessão",
-                body = "Nenhuma ação remota é iniciada sem sua autorização explícita. Você pode interromper o compartilhamento e revogar permissões a qualquer momento."
+                title = "3. SeguranÃ§a da sessÃ£o",
+                body = "Nenhuma aÃ§Ã£o remota Ã© iniciada sem sua autorizaÃ§Ã£o explÃ­cita. VocÃª pode interromper o compartilhamento e revogar permissÃµes a qualquer momento."
             )
             PolicySection(
                 title = "4. Encerrar atendimento",
-                body = "Quando desejar, finalize o suporte pelo botão de encerramento na tela de sessão. Você também pode interromper permissões diretamente nas configurações do seu dispositivo."
+                body = "Quando desejar, finalize o suporte pelo botÃ£o de encerramento na tela de sessÃ£o. VocÃª tambÃ©m pode interromper permissÃµes diretamente nas configuraÃ§Ãµes do seu dispositivo."
             )
             PolicySection(
                 title = "5. Problemas comuns",
-                body = "Se a conexão estiver instável, verifique internet, bateria e permissões do app. Em caso de falha de acesso remoto, confira se o serviço de acessibilidade do Suporte X está ativado."
+                body = "Se a conexÃ£o estiver instÃ¡vel, verifique internet, bateria e permissÃµes do app. Em caso de falha de acesso remoto, confira se o serviÃ§o de acessibilidade do Suporte X estÃ¡ ativado."
             )
             PolicySection(
                 title = "6. Canais oficiais",
-                body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
+                body = "Para suporte administrativo, dÃºvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
             )
         }
     }
@@ -1157,14 +1519,14 @@ private fun PrivacyPolicyScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("âœ•", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text("Política de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("PolÃ­tica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Última atualização: 11 de março de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Ãšltima atualizaÃ§Ã£o: 11 de marÃ§o de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1173,42 +1535,42 @@ private fun PrivacyPolicyScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                "A Suporte X valoriza a privacidade e a segurança dos dados dos usuários. Esta Política de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informações durante a utilização do aplicativo e dos serviços de suporte técnico remoto.",
+                "A Suporte X valoriza a privacidade e a seguranÃ§a dos dados dos usuÃ¡rios. Esta PolÃ­tica de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informaÃ§Ãµes durante a utilizaÃ§Ã£o do aplicativo e dos serviÃ§os de suporte tÃ©cnico remoto.",
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
             Spacer(Modifier.height(14.dp))
             PolicySection(
                 title = "1. Dados que coletamos",
-                body = "Para a prestação adequada do serviço de suporte técnico remoto, podemos coletar as seguintes informações:\n\n• Nome informado pelo usuário no aplicativo\n• Identificadores de sessão e atendimento\n• Informações técnicas do dispositivo utilizado\n• Mensagens trocadas no chat de atendimento\n• Arquivos enviados durante o suporte técnico\n• Registros técnicos necessários para diagnóstico e resolução de problemas\n\nEssas informações são coletadas exclusivamente para viabilizar o funcionamento do serviço de suporte."
+                body = "Para a prestaÃ§Ã£o adequada do serviÃ§o de suporte tÃ©cnico remoto, podemos coletar as seguintes informaÃ§Ãµes:\n\nâ€¢ Nome informado pelo usuÃ¡rio no aplicativo\nâ€¢ Identificadores de sessÃ£o e atendimento\nâ€¢ InformaÃ§Ãµes tÃ©cnicas do dispositivo utilizado\nâ€¢ Mensagens trocadas no chat de atendimento\nâ€¢ Arquivos enviados durante o suporte tÃ©cnico\nâ€¢ Registros tÃ©cnicos necessÃ¡rios para diagnÃ³stico e resoluÃ§Ã£o de problemas\n\nEssas informaÃ§Ãµes sÃ£o coletadas exclusivamente para viabilizar o funcionamento do serviÃ§o de suporte."
             )
             PolicySection(
                 title = "2. Finalidade do uso dos dados",
-                body = "Os dados coletados são utilizados para:\n\n• Identificar o usuário durante o atendimento\n• Realizar suporte técnico remoto\n• Registrar o histórico de sessões de atendimento\n• Diagnosticar e solucionar problemas técnicos\n• Melhorar a qualidade e eficiência do serviço\n• Garantir a segurança e integridade da plataforma"
+                body = "Os dados coletados sÃ£o utilizados para:\n\nâ€¢ Identificar o usuÃ¡rio durante o atendimento\nâ€¢ Realizar suporte tÃ©cnico remoto\nâ€¢ Registrar o histÃ³rico de sessÃµes de atendimento\nâ€¢ Diagnosticar e solucionar problemas tÃ©cnicos\nâ€¢ Melhorar a qualidade e eficiÃªncia do serviÃ§o\nâ€¢ Garantir a seguranÃ§a e integridade da plataforma"
             )
             PolicySection(
                 title = "3. Compartilhamento de dados",
-                body = "A Suporte X não vende, aluga ou comercializa dados pessoais dos usuários.\n\nO compartilhamento de informações pode ocorrer apenas quando necessário com:\n\n• Provedores de infraestrutura e hospedagem\n• Serviços de armazenamento de dados\n• Ferramentas necessárias para o funcionamento da plataforma\n\nTodos os parceiros seguem padrões de segurança e proteção de dados compatíveis com a legislação aplicável."
+                body = "A Suporte X nÃ£o vende, aluga ou comercializa dados pessoais dos usuÃ¡rios.\n\nO compartilhamento de informaÃ§Ãµes pode ocorrer apenas quando necessÃ¡rio com:\n\nâ€¢ Provedores de infraestrutura e hospedagem\nâ€¢ ServiÃ§os de armazenamento de dados\nâ€¢ Ferramentas necessÃ¡rias para o funcionamento da plataforma\n\nTodos os parceiros seguem padrÃµes de seguranÃ§a e proteÃ§Ã£o de dados compatÃ­veis com a legislaÃ§Ã£o aplicÃ¡vel."
             )
             PolicySection(
-                title = "4. Permissões e controle do usuário",
-                body = "Alguns recursos do aplicativo podem solicitar permissões específicas do dispositivo, como:\n\n• Compartilhamento de tela\n• Acesso remoto ao dispositivo\n• Envio de arquivos ou imagens\n\nEssas permissões são sempre solicitadas com autorização explícita do usuário e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
+                title = "4. PermissÃµes e controle do usuÃ¡rio",
+                body = "Alguns recursos do aplicativo podem solicitar permissÃµes especÃ­ficas do dispositivo, como:\n\nâ€¢ Compartilhamento de tela\nâ€¢ Acesso remoto ao dispositivo\nâ€¢ Envio de arquivos ou imagens\n\nEssas permissÃµes sÃ£o sempre solicitadas com autorizaÃ§Ã£o explÃ­cita do usuÃ¡rio e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
             )
             PolicySection(
-                title = "5. Armazenamento e retenção de dados",
-                body = "Os dados coletados são armazenados apenas pelo período necessário para:\n\n• Prestação do suporte técnico\n• Cumprimento de obrigações legais\n• Garantia da segurança operacional do serviço\n\nApós esse período, os dados podem ser excluídos ou anonimizados."
+                title = "5. Armazenamento e retenÃ§Ã£o de dados",
+                body = "Os dados coletados sÃ£o armazenados apenas pelo perÃ­odo necessÃ¡rio para:\n\nâ€¢ PrestaÃ§Ã£o do suporte tÃ©cnico\nâ€¢ Cumprimento de obrigaÃ§Ãµes legais\nâ€¢ Garantia da seguranÃ§a operacional do serviÃ§o\n\nApÃ³s esse perÃ­odo, os dados podem ser excluÃ­dos ou anonimizados."
             )
             PolicySection(
-                title = "6. Direitos do usuário",
-                body = "Em conformidade com a Lei Geral de Proteção de Dados (LGPD – Lei nº 13.709/2018), o usuário possui o direito de:\n\n• Solicitar acesso aos seus dados\n• Corrigir dados incompletos ou desatualizados\n• Solicitar exclusão de dados quando aplicável\n• Solicitar informações sobre o tratamento de dados\n\nAs solicitações podem ser feitas pelos canais de contato oficiais."
+                title = "6. Direitos do usuÃ¡rio",
+                body = "Em conformidade com a Lei Geral de ProteÃ§Ã£o de Dados (LGPD â€“ Lei nÂº 13.709/2018), o usuÃ¡rio possui o direito de:\n\nâ€¢ Solicitar acesso aos seus dados\nâ€¢ Corrigir dados incompletos ou desatualizados\nâ€¢ Solicitar exclusÃ£o de dados quando aplicÃ¡vel\nâ€¢ Solicitar informaÃ§Ãµes sobre o tratamento de dados\n\nAs solicitaÃ§Ãµes podem ser feitas pelos canais de contato oficiais."
             )
             PolicySection(
-                title = "7. Segurança das informações",
-                body = "A Suporte X adota medidas técnicas e organizacionais para proteger os dados contra acesso não autorizado, alteração, divulgação ou destruição indevida.\n\nEntre as medidas aplicadas estão:\n\n• Controle de acesso aos dados\n• Autenticação segura\n• Registros de auditoria\n• Proteção da infraestrutura da plataforma"
+                title = "7. SeguranÃ§a das informaÃ§Ãµes",
+                body = "A Suporte X adota medidas tÃ©cnicas e organizacionais para proteger os dados contra acesso nÃ£o autorizado, alteraÃ§Ã£o, divulgaÃ§Ã£o ou destruiÃ§Ã£o indevida.\n\nEntre as medidas aplicadas estÃ£o:\n\nâ€¢ Controle de acesso aos dados\nâ€¢ AutenticaÃ§Ã£o segura\nâ€¢ Registros de auditoria\nâ€¢ ProteÃ§Ã£o da infraestrutura da plataforma"
             )
             PolicySection(
                 title = "8. Contato",
-                body = "Para dúvidas, solicitações ou questões relacionadas à privacidade e proteção de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+                body = "Para dÃºvidas, solicitaÃ§Ãµes ou questÃµes relacionadas Ã  privacidade e proteÃ§Ã£o de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
             )
         }
     }
@@ -1229,7 +1591,7 @@ private fun TermsOfUseScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("✕", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("âœ•", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -1238,7 +1600,7 @@ private fun TermsOfUseScreen(
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
         Text("Operado por Xavier Assessoria Digital", color = textMuted, fontSize = 13.sp)
         Text("CNPJ: 45.765.097/0001-61", color = textMuted, fontSize = 13.sp)
-        Text("Última atualização: 11 de março de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Ãšltima atualizaÃ§Ã£o: 11 de marÃ§o de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1247,36 +1609,36 @@ private fun TermsOfUseScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             PolicySection(
-                title = "1. Sobre o serviço",
-                body = "O Suporte X é uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realização de suporte técnico remoto entre técnicos e usuários, por meio de comunicação em tempo real, compartilhamento de tela e ferramentas de assistência remota.\n\nO serviço tem como objetivo facilitar o diagnóstico e a resolução de problemas técnicos diretamente no dispositivo do usuário, mediante autorização expressa do mesmo."
+                title = "1. Sobre o serviÃ§o",
+                body = "O Suporte X Ã© uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realizaÃ§Ã£o de suporte tÃ©cnico remoto entre tÃ©cnicos e usuÃ¡rios, por meio de comunicaÃ§Ã£o em tempo real, compartilhamento de tela e ferramentas de assistÃªncia remota.\n\nO serviÃ§o tem como objetivo facilitar o diagnÃ³stico e a resoluÃ§Ã£o de problemas tÃ©cnicos diretamente no dispositivo do usuÃ¡rio, mediante autorizaÃ§Ã£o expressa do mesmo."
             )
             PolicySection(
-                title = "2. Aceitação dos termos",
-                body = "Ao utilizar o aplicativo Suporte X, o usuário declara que:\n\n• leu e compreendeu estes Termos de Uso\n• concorda com as condições aqui estabelecidas\n• autoriza o funcionamento das funcionalidades necessárias para o suporte técnico remoto\n\nCaso o usuário não concorde com estes termos, não deverá utilizar o aplicativo."
+                title = "2. AceitaÃ§Ã£o dos termos",
+                body = "Ao utilizar o aplicativo Suporte X, o usuÃ¡rio declara que:\n\nâ€¢ leu e compreendeu estes Termos de Uso\nâ€¢ concorda com as condiÃ§Ãµes aqui estabelecidas\nâ€¢ autoriza o funcionamento das funcionalidades necessÃ¡rias para o suporte tÃ©cnico remoto\n\nCaso o usuÃ¡rio nÃ£o concorde com estes termos, nÃ£o deverÃ¡ utilizar o aplicativo."
             )
             PolicySection(
                 title = "3. Funcionamento do suporte remoto",
-                body = "Durante uma sessão de suporte, o usuário poderá autorizar funcionalidades como:\n\n• compartilhamento de tela\n• envio de arquivos\n• comunicação por chat ou áudio\n• controle remoto assistido do dispositivo\n\nEssas funcionalidades só são ativadas com autorização explícita do usuário e podem ser interrompidas a qualquer momento pelo próprio aplicativo."
+                body = "Durante uma sessÃ£o de suporte, o usuÃ¡rio poderÃ¡ autorizar funcionalidades como:\n\nâ€¢ compartilhamento de tela\nâ€¢ envio de arquivos\nâ€¢ comunicaÃ§Ã£o por chat ou Ã¡udio\nâ€¢ controle remoto assistido do dispositivo\n\nEssas funcionalidades sÃ³ sÃ£o ativadas com autorizaÃ§Ã£o explÃ­cita do usuÃ¡rio e podem ser interrompidas a qualquer momento pelo prÃ³prio aplicativo."
             )
             PolicySection(
-                title = "4. Responsabilidades do usuário",
-                body = "O usuário é responsável por:\n\n• conceder permissões apenas quando desejar iniciar um atendimento\n• encerrar a sessão de suporte quando considerar necessário\n• não utilizar o aplicativo para atividades ilegais ou abusivas"
+                title = "4. Responsabilidades do usuÃ¡rio",
+                body = "O usuÃ¡rio Ã© responsÃ¡vel por:\n\nâ€¢ conceder permissÃµes apenas quando desejar iniciar um atendimento\nâ€¢ encerrar a sessÃ£o de suporte quando considerar necessÃ¡rio\nâ€¢ nÃ£o utilizar o aplicativo para atividades ilegais ou abusivas"
             )
             PolicySection(
-                title = "5. Limitação de responsabilidade",
-                body = "A Xavier Assessoria Digital não se responsabiliza por:\n\n• falhas causadas por terceiros\n• problemas decorrentes de uso indevido do dispositivo\n• indisponibilidade temporária de serviços externos"
+                title = "5. LimitaÃ§Ã£o de responsabilidade",
+                body = "A Xavier Assessoria Digital nÃ£o se responsabiliza por:\n\nâ€¢ falhas causadas por terceiros\nâ€¢ problemas decorrentes de uso indevido do dispositivo\nâ€¢ indisponibilidade temporÃ¡ria de serviÃ§os externos"
             )
             PolicySection(
-                title = "6. Modificações do serviço",
-                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de segurança, desempenho ou conformidade legal."
+                title = "6. ModificaÃ§Ãµes do serviÃ§o",
+                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de seguranÃ§a, desempenho ou conformidade legal."
             )
             PolicySection(
-                title = "7. Legislação aplicável",
-                body = "Este serviço é regido pelas leis da República Federativa do Brasil, especialmente pela:\n\n• Lei Geral de Proteção de Dados (LGPD – Lei nº 13.709/2018)"
+                title = "7. LegislaÃ§Ã£o aplicÃ¡vel",
+                body = "Este serviÃ§o Ã© regido pelas leis da RepÃºblica Federativa do Brasil, especialmente pela:\n\nâ€¢ Lei Geral de ProteÃ§Ã£o de Dados (LGPD â€“ Lei nÂº 13.709/2018)"
             )
             PolicySection(
                 title = "8. Contato",
-                body = "Empresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895w\nResidencial Paraíso\nNova Mutum – MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
+                body = "Empresa responsÃ¡vel:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereÃ§o:\nRua dos JequitibÃ¡s, 1895w\nResidencial ParaÃ­so\nNova Mutum â€“ MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
     }
@@ -1306,13 +1668,14 @@ private fun WaitingScreen(
         Spacer(Modifier.height(80.dp))
         CircularProgressIndicator()
         Spacer(Modifier.height(16.dp))
-        Text("Acionando técnico, aguarde…", fontSize = 18.sp)
-        Text("Tempo médio: ~2–5 min", color = textMuted)
+        Text("Acionando tÃ©cnico, aguardeâ€¦", fontSize = 18.sp)
+        Text("Tempo mÃ©dio: ~2â€“5 min", color = textMuted)
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = onCancel,
             modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) { Text("CANCELAR SOLICITAÇÃO", color = Color.White) }
+        ) { Text("CANCELAR SOLICITAÃ‡ÃƒO", color = Color.White) }
     }
 }
+

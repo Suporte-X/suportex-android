@@ -18,3 +18,6 @@ Thumbs.db
 /app/release/baselineProfiles/1/app-release.dm
 /app/release/app-release.apk
 /app/release/output-metadata.json
+
+# Codex local memory (do not commit)
+.codex-memory/
