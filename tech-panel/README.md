@@ -1,20 +1,20 @@
-# Painel Técnico Web (MVP)
+# Painel Tecnico Web (MVP)
 
-Painel para:
-- visualizar novas solicitações (`support_sessions`);
-- aceitar atendimento sem sair da tela;
-- abrir cadastro inicial do cliente dentro do próprio painel;
-- disparar verificação pós-cadastro em segundo plano (`client_verifications` + `pnv_requests`);
-- usar fallback manual de verificação quando necessário;
-- consultar ficha completa, histórico e pedidos de crédito.
+Painel simples para:
+- visualizar novas solicitacoes (`support_sessions`);
+- cadastrar cliente rapidamente (`clients`);
+- consultar ficha completa;
+- ajustar creditos manualmente;
+- registrar encerramento de atendimento;
+- visualizar pedidos de credito (`credit_orders`).
 
 ## Como usar
-1. Abra [`index.html`](./index.html) em um servidor estático.
+1. Abra [`index.html`](./index.html) em um servidor estatico.
 2. Defina `window.SUPORTEX_FIREBASE_CONFIG` com as credenciais do projeto.
-3. Garanta permissão Firestore para o usuário autenticado (ideal: claim supervisor).
+3. Garanta permissao Firestore para o usuario autenticado (ideal: claim supervisor).
 
-## Observações
-- O painel usa os mesmos nomes de coleção do app Android.
-- O cadastro inicial é guiado pelo técnico após aceitar o atendimento.
-- O indicador de verificação usa ponto verde/vermelho no card/ficha do cliente.
-- Pagamentos PIX/cartão continuam como placeholder.
+## Observacoes
+- O painel usa os mesmos nomes de colecao do app Android.
+- O e-mail principal e opcional e manual.
+- Pagamentos PIX/cartao continuam como placeholder (estrutura pronta).
+- Compra por WhatsApp ja aparece em `credit_orders` com `whatsappRequested = true`.

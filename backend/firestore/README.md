@@ -1,16 +1,16 @@
 # Suporte X - Modelagem Firestore
 
-Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créditos, cadastro técnico e verificação.
+Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, creditos e cobranca futura.
 
 ## collections/clients
 - `id` (document id): `phone_<somente_digitos>`
-- `phone`: telefone principal do cliente
+- `phone`: telefone principal do cliente (base de identificacao)
 - `name`: nome do cliente
 - `primaryEmail` (opcional/manual)
-- `notes`: observações administrativas
-- `credits`: créditos disponíveis
+- `notes`: observacoes administrativas
+- `credits`: creditos disponiveis
 - `supportsUsed`: atendimentos utilizados
-- `freeFirstSupportUsed`: primeiro atendimento grátis já usado
+- `freeFirstSupportUsed`: primeiro atendimento gratis ja usado
 - `status`: `first_support_pending | with_credit | without_credit`
 - `createdAt`
 - `updatedAt`
@@ -26,41 +26,9 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `createdAt`
 - `updatedAt`
 
-## collections/client_app_links
-- `id` (document id): `clientUid` do app
-- `clientUid`
-- `clientId`
-- `phone`
-- `supportSessionId` (última sessão vinculada)
-- `createdAt`
-- `updatedAt`
-
-## collections/client_verifications
-- `id` (document id): `clientId`
-- `clientId`
-- `primaryPhone` (telefone informado no cadastro técnico)
-- `verifiedPhone` (telefone validado no fluxo de verificação)
-- `status`: `pending | verified | mismatch | manual_required`
-- `source`
-- `mismatchReason` (quando divergente)
-- `lastTriggerAt`
-- `lastVerificationAt`
-- `updatedAt`
-
-## collections/pnv_requests
-- `id`
-- `clientId`
-- `clientUid`
-- `supportSessionId`
-- `manualFallback`
-- `status`: `pending | manual_pending | processed`
-- `createdAt`
-- `processedAt`
-- `updatedAt`
-
 ## collections/support_sessions
 - `id`
-- `clientId` (pode iniciar vazio para cliente novo)
+- `clientId`
 - `clientPhone`
 - `clientName`
 - `clientUid`
@@ -70,7 +38,6 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `startedAt`
 - `endedAt`
 - `status`: `queued | in_progress | completed | cancelled`
-- `requiresTechnicianRegistration`
 - `isFreeFirstSupport`
 - `creditsConsumed`
 - `problemSummary`
