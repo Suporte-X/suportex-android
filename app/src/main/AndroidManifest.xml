@@ -20,7 +20,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SuporteX">
 
-        <!-- Firebase Messaging (NÃO é o serviço de captura) -->
+        <!-- Firebase Messaging (não é o serviço de captura) -->
         <service
             android:name="com.suportex.app.push.AppFirebaseMessagingService"
             android:exported="false">
@@ -29,7 +29,7 @@
             </intent-filter>
         </service>
 
-        <!-- ✅ Serviço de captura de tela (foreground) -->
+        <!-- Serviço de captura de tela (foreground) -->
         <service
             android:name="com.suportex.app.ScreenCaptureService"
             android:exported="false"

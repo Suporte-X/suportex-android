@@ -14,6 +14,15 @@ data class ClientRecord(
     val status: String
 )
 
+data class ClientVerificationRecord(
+    val clientId: String,
+    val primaryPhone: String?,
+    val verifiedPhone: String?,
+    val status: String,
+    val lastVerificationAt: Long?,
+    val updatedAt: Long?
+)
+
 data class ClientMetaRecord(
     val clientId: String,
     val totalSessions: Int,
@@ -74,24 +83,56 @@ data class SupportReportRecord(
 )
 
 data class ClientHomeSnapshot(
+    val clientUid: String?,
     val phone: String?,
     val client: ClientRecord?,
     val clientMeta: ClientMetaRecord?,
+    val verification: ClientVerificationRecord?,
     val packages: List<CreditPackageRecord>
 ) {
+    val isRegisteredClient: Boolean get() = client != null
     val creditsAvailable: Int get() = client?.credits ?: 0
-    val freeFirstSupportPending: Boolean get() = client?.freeFirstSupportUsed == false
+    val freeFirstSupportPending: Boolean get() = client?.freeFirstSupportUsed == false || client == null
+    val lifecycleState: ClientLifecycleState
+        get() = when {
+            client == null -> ClientLifecycleState.UNREGISTERED
+            !client.freeFirstSupportUsed -> ClientLifecycleState.REGISTERED_FIRST_SUPPORT_PENDING
+            client.credits > 0 -> ClientLifecycleState.REGISTERED_WITH_CREDIT
+            else -> ClientLifecycleState.REGISTERED_WITHOUT_CREDIT
+        }
+    val isRegisteredWithoutCredit: Boolean
+        get() = lifecycleState == ClientLifecycleState.REGISTERED_WITHOUT_CREDIT
+    val canRequestSupport: Boolean get() = !isRegisteredWithoutCredit
+    val verificationState: ClientVerificationState
+        get() = if (verification?.status == "verified") {
+            ClientVerificationState.VERIFIED
+        } else {
+            ClientVerificationState.NOT_VERIFIED
+        }
+}
+
+enum class ClientLifecycleState {
+    UNREGISTERED,
+    REGISTERED_FIRST_SUPPORT_PENDING,
+    REGISTERED_WITH_CREDIT,
+    REGISTERED_WITHOUT_CREDIT
+}
+
+enum class ClientVerificationState {
+    VERIFIED,
+    NOT_VERIFIED
 }
 
 enum class ClientFinancialStatus {
+    UNREGISTERED_NEW_CLIENT,
     WITH_CREDIT,
     WITHOUT_CREDIT,
     FREE_FIRST_SUPPORT_PENDING
 }
 
 data class SupportStartContext(
-    val clientId: String,
-    val phone: String,
+    val clientId: String?,
+    val phone: String?,
     val isNewClient: Boolean,
     val isFreeFirstSupport: Boolean,
     val creditsToConsume: Int
@@ -101,13 +142,11 @@ sealed class SupportAccessDecision {
     data class Allowed(
         val startContext: SupportStartContext,
         val financialStatus: ClientFinancialStatus,
-        val client: ClientRecord
+        val client: ClientRecord?
     ) : SupportAccessDecision()
 
     data class BlockedNeedsCredit(
         val client: ClientRecord,
         val packages: List<CreditPackageRecord>
     ) : SupportAccessDecision()
-
-    data object NeedsPhone : SupportAccessDecision()
 }

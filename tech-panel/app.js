@@ -14,7 +14,8 @@ import {
   query,
   runTransaction,
   setDoc,
-  updateDoc
+  updateDoc,
+  where
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const COLLECTIONS = {
@@ -23,13 +24,24 @@ const COLLECTIONS = {
   supportSessions: "support_sessions",
   supportReports: "support_reports",
   creditOrders: "credit_orders",
-  creditPackages: "credit_packages"
+  creditPackages: "credit_packages",
+  clientAppLinks: "client_app_links",
+  clientVerifications: "client_verifications",
+  pnvRequests: "pnv_requests"
+};
+
+const PNV_STATUS = {
+  VERIFIED: "verified",
+  PENDING: "pending",
+  MISMATCH: "mismatch",
+  MANUAL_REQUIRED: "manual_required"
 };
 
 const state = {
   selectedClientId: null,
   selectedPhone: null,
-  packages: []
+  packages: [],
+  activeSession: null
 };
 
 const firebaseConfig = window.SUPORTEX_FIREBASE_CONFIG;
@@ -42,7 +54,12 @@ const queueList = document.querySelector("#queue-list");
 const historyList = document.querySelector("#history-list");
 const ordersList = document.querySelector("#orders-list");
 const profileContainer = document.querySelector("#client-profile");
-const quickRegisterForm = document.querySelector("#quick-register-form");
+const intakePanel = document.querySelector("#intake-panel");
+const intakeForm = document.querySelector("#intake-form");
+const intakeEmpty = document.querySelector("#intake-empty");
+const intakeSessionMeta = document.querySelector("#intake-session-meta");
+const intakeSessionId = document.querySelector("#intake-session-id");
+const intakeClearBtn = document.querySelector("#intake-clear");
 const refreshAllBtn = document.querySelector("#refresh-all");
 const searchClientBtn = document.querySelector("#search-client-btn");
 const searchPhoneInput = document.querySelector("#search-phone");
@@ -55,10 +72,11 @@ async function setup() {
     await signInAnonymously(auth);
   } catch (err) {
     console.error(err);
-    authStatus.textContent = "Falha de autenticacao";
+    authStatus.textContent = "Falha de autenticação";
   }
+
   onAuthStateChanged(auth, async (user) => {
-    authStatus.textContent = user ? `Conectado: ${user.uid.slice(0, 8)}...` : "Sem autenticacao";
+    authStatus.textContent = user ? `Conectado: ${user.uid.slice(0, 8)}...` : "Sem autenticação";
     await loadAll();
   });
 }
@@ -68,33 +86,19 @@ function bindActions() {
     loadAll();
   });
 
-  quickRegisterForm.addEventListener("submit", async (event) => {
+  intakeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const payload = {
-      name: document.querySelector("#reg-name").value.trim(),
-      phone: normalizePhone(document.querySelector("#reg-phone").value),
-      email: document.querySelector("#reg-email").value.trim() || null,
-      notes: document.querySelector("#reg-notes").value.trim() || null
-    };
-    if (!payload.name || !payload.phone) {
-      alert("Nome e telefone sao obrigatorios.");
-      return;
-    }
-    try {
-      const clientId = await registerOrUpdateClient(payload);
-      quickRegisterForm.reset();
-      await loadClientProfile(clientId);
-      await loadQueue();
-    } catch (err) {
-      console.error(err);
-      alert("Nao foi possivel cadastrar o cliente.");
-    }
+    await handleIntakeSubmit();
+  });
+
+  intakeClearBtn.addEventListener("click", () => {
+    clearIntakePanel();
   });
 
   searchClientBtn.addEventListener("click", async () => {
     const normalized = normalizePhone(searchPhoneInput.value);
     if (!normalized) {
-      alert("Digite um telefone valido.");
+      alert("Digite um telefone válido.");
       return;
     }
     const clientId = clientDocIdFromPhone(normalized);
@@ -108,6 +112,7 @@ async function loadAll() {
     loadQueue(),
     loadOrders()
   ]);
+
   if (state.selectedClientId) {
     await loadClientProfile(state.selectedClientId);
   }
@@ -130,64 +135,240 @@ async function loadQueue() {
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))
     .slice(0, 40);
 
-  const rows = await Promise.all(
-    sessions.map(async (session) => {
-      const clientId = session.clientId || null;
-      if (!clientId) {
-        return { session, client: null };
-      }
-      const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, clientId));
-      return {
-        session,
-        client: clientSnap.exists() ? { id: clientSnap.id, ...clientSnap.data() } : null
-      };
-    })
-  );
+  const rows = await Promise.all(sessions.map(loadQueueRow));
 
   if (!rows.length) {
-    queueList.innerHTML = "<small>Sem solicitacoes pendentes.</small>";
+    queueList.innerHTML = "<small>Sem solicitações pendentes.</small>";
+    clearIntakePanelIfSessionMissing();
     return;
   }
 
   queueList.innerHTML = "";
-  rows.forEach(({ session, client }) => {
-    const isNewClient = !client;
-    const freePending = isNewClient ? true : client.freeFirstSupportUsed === false;
-    const noCredit = !freePending && (client?.credits ?? 0) <= 0;
+  rows.forEach((row) => {
+    const card = renderQueueCard(row);
+    queueList.appendChild(card);
+  });
 
-    const card = document.createElement("article");
-    card.className = `queue-item ${isNewClient ? "is-new" : ""} ${noCredit ? "no-credit" : ""}`;
-    card.innerHTML = `
-      <strong>${client?.name || "Cliente nao cadastrado"}</strong>
-      <div>Telefone: ${session.clientPhone || client?.phone || "-"}</div>
-      <div>Status da sessao: ${session.status || "-"}</div>
-      <div class="queue-meta">
-        ${isNewClient ? '<span class="badge warn">Primeiro atendimento gratis</span>' : ""}
-        ${noCredit ? '<span class="badge danger">Sem credito</span>' : ""}
-        ${!isNewClient && !noCredit ? '<span class="badge ok">Com credito</span>' : ""}
-      </div>
-      <div class="profile-actions">
-        <button type="button" data-open-client="${client?.id || ""}" data-phone="${session.clientPhone || ""}">
-          Abrir ficha
-        </button>
-      </div>
-    `;
+  clearIntakePanelIfSessionMissing(rows);
+}
 
-    const openBtn = card.querySelector("button[data-open-client]");
-    openBtn.addEventListener("click", async () => {
-      if (client?.id) {
-        await loadClientProfile(client.id);
-        return;
-      }
-      const phone = normalizePhone(openBtn.dataset.phone || "");
-      if (phone) {
-        document.querySelector("#reg-phone").value = phone;
-      }
-      document.querySelector("#reg-name").focus();
-      alert("Cliente nao cadastrado. Use o formulario de cadastro rapido.");
+async function loadQueueRow(session) {
+  let client = null;
+  if (session.clientId) {
+    const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, session.clientId));
+    if (clientSnap.exists()) {
+      client = { id: clientSnap.id, ...clientSnap.data() };
+    }
+  }
+
+  const verification = client ? await loadVerification(client.id) : null;
+  return { session, client, verification };
+}
+
+function renderQueueCard(row) {
+  const { session, client, verification } = row;
+  const isNewClient = !client;
+  const freePending = isNewClient ? true : client.freeFirstSupportUsed === false;
+  const noCredit = !freePending && (client?.credits ?? 0) <= 0;
+  const verificationUi = verificationPresentation(verification);
+
+  const card = document.createElement("article");
+  card.className = `queue-item ${isNewClient ? "is-new" : ""} ${noCredit ? "no-credit" : ""}`;
+  card.innerHTML = `
+    <div class="queue-header-row">
+      <strong>${client?.name || "Cliente não cadastrado"}</strong>
+      ${client ? `<button class="verification-dot ${verificationUi.className}" type="button" title="${escapeHtml(verificationUi.tooltip)}" data-verify-client="${client.id}"></button>` : ""}
+    </div>
+    <div>Telefone: ${session.clientPhone || client?.phone || "-"}</div>
+    <div>Status da sessão: ${session.status || "-"}</div>
+    <div class="queue-meta">
+      ${isNewClient ? '<span class="badge warn">Cadastro inicial pendente</span>' : ""}
+      ${noCredit ? '<span class="badge danger">Sem crédito</span>' : ""}
+      ${!isNewClient && !noCredit ? '<span class="badge ok">Com crédito</span>' : ""}
+      ${session.status === "queued" ? '<span class="badge neutral">Aguardando aceite</span>' : ""}
+      ${session.status === "in_progress" ? '<span class="badge active">Em atendimento</span>' : ""}
+    </div>
+    <div class="profile-actions queue-actions">
+      ${session.status === "queued" ? `<button type="button" data-accept-session="${session.id}">Aceitar atendimento</button>` : ""}
+      <button type="button" data-open-intake="${session.id}">Cadastro inicial</button>
+      ${client ? `<button type="button" data-open-client="${client.id}">Abrir ficha</button>` : ""}
+    </div>
+  `;
+
+  const acceptBtn = card.querySelector("button[data-accept-session]");
+  if (acceptBtn) {
+    acceptBtn.addEventListener("click", async () => {
+      await acceptSupportSession(session.id);
+      const updatedRow = await loadQueueRow({ ...session, status: "in_progress" });
+      openIntakePanel(updatedRow);
+      await loadQueue();
+    });
+  }
+
+  const intakeBtn = card.querySelector("button[data-open-intake]");
+  intakeBtn.addEventListener("click", () => {
+    openIntakePanel(row);
+  });
+
+  const openClientBtn = card.querySelector("button[data-open-client]");
+  if (openClientBtn) {
+    openClientBtn.addEventListener("click", async () => {
+      await loadClientProfile(client.id);
+    });
+  }
+
+  const verifyBtn = card.querySelector("button[data-verify-client]");
+  if (verifyBtn) {
+    verifyBtn.addEventListener("click", async () => {
+      await onVerificationIndicatorClick(client, verification, session.id);
+    });
+  }
+
+  return card;
+}
+
+async function acceptSupportSession(sessionId) {
+  const now = Date.now();
+  await updateDoc(doc(db, COLLECTIONS.supportSessions, sessionId), {
+    status: "in_progress",
+    techId: auth.currentUser?.uid || null,
+    techName: "Painel Técnico",
+    updatedAt: now
+  });
+}
+
+function openIntakePanel(row) {
+  state.activeSession = row.session;
+  intakeSessionId.value = row.session.id;
+  intakeSessionMeta.textContent = `Sessão ${row.session.id.slice(0, 8)} · ${row.session.status || "queued"}`;
+
+  const nameInput = intakeForm.querySelector("#intake-name");
+  const phoneInput = intakeForm.querySelector("#intake-phone");
+  const emailInput = intakeForm.querySelector("#intake-email");
+  const notesInput = intakeForm.querySelector("#intake-notes");
+
+  nameInput.value = row.client?.name || row.session.clientName || "";
+  phoneInput.value = row.client?.phone || row.session.clientPhone || "";
+  emailInput.value = row.client?.primaryEmail || "";
+  notesInput.value = row.client?.notes || "";
+
+  intakeEmpty.classList.add("hidden");
+  intakeForm.classList.remove("hidden");
+  intakePanel.classList.add("is-active");
+  nameInput.focus();
+}
+
+function clearIntakePanel() {
+  state.activeSession = null;
+  intakeSessionId.value = "";
+  intakeSessionMeta.textContent = "Aguardando aceite de atendimento";
+  intakeForm.reset();
+  intakeForm.classList.add("hidden");
+  intakeEmpty.classList.remove("hidden");
+  intakePanel.classList.remove("is-active");
+}
+
+function clearIntakePanelIfSessionMissing(rows = null) {
+  if (!state.activeSession) return;
+  const source = rows || [];
+  const sessionStillVisible = source.some((row) => row.session.id === state.activeSession.id);
+  if (!sessionStillVisible) {
+    clearIntakePanel();
+  }
+}
+
+async function handleIntakeSubmit() {
+  if (!state.activeSession) {
+    alert("Aceite um atendimento para abrir o cadastro inicial.");
+    return;
+  }
+
+  const payload = {
+    name: intakeForm.querySelector("#intake-name").value.trim(),
+    phone: normalizePhone(intakeForm.querySelector("#intake-phone").value),
+    email: intakeForm.querySelector("#intake-email").value.trim() || null,
+    notes: intakeForm.querySelector("#intake-notes").value.trim() || null
+  };
+
+  if (!payload.name || !payload.phone) {
+    alert("Nome e telefone são obrigatórios.");
+    return;
+  }
+
+  try {
+    const client = await registerOrUpdateClient(payload);
+    await bindClientToSession({
+      sessionId: state.activeSession.id,
+      client,
+      fallbackName: payload.name
+    });
+    await linkClientUidFromSession(state.activeSession, client);
+    await triggerVerificationFromTechnician({
+      client,
+      supportSessionId: state.activeSession.id,
+      clientUid: state.activeSession.clientUid || null,
+      manualFallback: false
     });
 
-    queueList.appendChild(card);
+    await loadClientProfile(client.id);
+    await loadQueue();
+    alert("Cliente cadastrado e verificação em segundo plano iniciada.");
+  } catch (err) {
+    console.error(err);
+    alert("Não foi possível concluir o cadastro inicial.");
+  }
+}
+
+async function bindClientToSession({ sessionId, client, fallbackName }) {
+  const isFreeFirstSupport = client.freeFirstSupportUsed !== true;
+  const creditsToConsume = isFreeFirstSupport ? 0 : 1;
+  await updateDoc(doc(db, COLLECTIONS.supportSessions, sessionId), {
+    clientId: client.id,
+    clientPhone: client.phone,
+    clientName: client.name || fallbackName || "Cliente",
+    isFreeFirstSupport,
+    creditsConsumed: creditsToConsume,
+    requiresTechnicianRegistration: false,
+    updatedAt: Date.now()
+  });
+}
+
+async function linkClientUidFromSession(session, client) {
+  const clientUid = String(session.clientUid || "").trim();
+  if (!clientUid) return;
+
+  const now = Date.now();
+  await setDoc(doc(db, COLLECTIONS.clientAppLinks, clientUid), {
+    clientUid,
+    clientId: client.id,
+    phone: client.phone,
+    supportSessionId: session.id,
+    updatedAt: now,
+    createdAt: now
+  }, { merge: true });
+}
+
+async function triggerVerificationFromTechnician({ client, supportSessionId, clientUid, manualFallback }) {
+  const now = Date.now();
+  const status = manualFallback ? PNV_STATUS.MANUAL_REQUIRED : PNV_STATUS.PENDING;
+
+  await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
+    clientId: client.id,
+    primaryPhone: client.phone,
+    status,
+    source: manualFallback ? "technician_manual_fallback" : "technician_registration",
+    lastTriggerAt: now,
+    updatedAt: now
+  }, { merge: true });
+
+  await addDoc(collection(db, COLLECTIONS.pnvRequests), {
+    clientId: client.id,
+    clientUid: clientUid || null,
+    supportSessionId: supportSessionId || null,
+    manualFallback: Boolean(manualFallback),
+    status: manualFallback ? "manual_pending" : "pending",
+    createdAt: now,
+    updatedAt: now
   });
 }
 
@@ -195,7 +376,7 @@ async function loadClientProfile(clientId) {
   const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, clientId));
   if (!clientSnap.exists()) {
     profileContainer.className = "profile-empty";
-    profileContainer.textContent = "Cliente nao encontrado.";
+    profileContainer.textContent = "Cliente não encontrado.";
     historyList.innerHTML = "";
     state.selectedClientId = null;
     state.selectedPhone = null;
@@ -205,20 +386,22 @@ async function loadClientProfile(clientId) {
   const client = { id: clientSnap.id, ...clientSnap.data() };
   const profileSnap = await getDoc(doc(db, COLLECTIONS.clientProfiles, client.id));
   const profile = profileSnap.exists() ? profileSnap.data() : null;
+  const verification = await loadVerification(client.id);
 
   state.selectedClientId = client.id;
   state.selectedPhone = client.phone || null;
-  renderClientProfile(client, profile);
+  renderClientProfile(client, profile, verification);
   await loadHistory(client.id);
   await loadOrders(client.id);
 }
 
-function renderClientProfile(client, profile) {
+function renderClientProfile(client, profile, verification) {
   const financialStatus = !client.freeFirstSupportUsed
-    ? "primeiro atendimento gratis pendente"
+    ? "primeiro atendimento grátis pendente"
     : (client.credits ?? 0) > 0
-      ? "com credito"
-      : "sem credito";
+      ? "com crédito"
+      : "sem crédito";
+  const verificationUi = verificationPresentation(verification);
 
   profileContainer.className = "";
   profileContainer.innerHTML = `
@@ -226,28 +409,33 @@ function renderClientProfile(client, profile) {
       <div><strong>Nome</strong>${client.name || "-"}</div>
       <div><strong>Telefone</strong>${client.phone || "-"}</div>
       <div><strong>E-mail principal</strong>${client.primaryEmail || "-"}</div>
-      <div><strong>Creditos disponiveis</strong>${client.credits ?? 0}</div>
+      <div><strong>Créditos disponíveis</strong>${client.credits ?? 0}</div>
       <div><strong>Atendimentos usados</strong>${client.supportsUsed ?? 0}</div>
-      <div><strong>Primeiro gratis usado</strong>${client.freeFirstSupportUsed ? "Sim" : "Nao"}</div>
+      <div><strong>Primeiro grátis usado</strong>${client.freeFirstSupportUsed ? "Sim" : "Não"}</div>
       <div><strong>Status financeiro</strong>${financialStatus}</div>
-      <div><strong>Total de sessoes</strong>${profile?.totalSessions ?? 0}</div>
+      <div>
+        <strong>Verificação</strong>
+        <button type="button" class="verification-dot ${verificationUi.className}" id="btn-verification-indicator" title="${escapeHtml(verificationUi.tooltip)}"></button>
+      </div>
+      <div><strong>Total de sessões</strong>${profile?.totalSessions ?? 0}</div>
       <div><strong>Total pago</strong>${profile?.totalPaidSessions ?? 0}</div>
-      <div><strong>Total gratis</strong>${profile?.totalFreeSessions ?? 0}</div>
-      <div><strong>Creditos comprados</strong>${profile?.totalCreditsPurchased ?? 0}</div>
-      <div><strong>Creditos usados</strong>${profile?.totalCreditsUsed ?? 0}</div>
-      <div><strong>Observacoes</strong>${client.notes || "-"}</div>
+      <div><strong>Total grátis</strong>${profile?.totalFreeSessions ?? 0}</div>
+      <div><strong>Créditos comprados</strong>${profile?.totalCreditsPurchased ?? 0}</div>
+      <div><strong>Créditos usados</strong>${profile?.totalCreditsUsed ?? 0}</div>
+      <div><strong>Observações</strong>${client.notes || "-"}</div>
     </div>
     <div class="profile-actions">
-      <button type="button" id="btn-add-note">Adicionar observacao</button>
-      <button type="button" id="btn-add-credit">Adicionar credito manualmente</button>
-      <button type="button" id="btn-remove-credit">Remover credito manualmente</button>
-      <button type="button" id="btn-close-session">Registrar atendimento concluido</button>
+      <button type="button" id="btn-add-note">Adicionar observação</button>
+      <button type="button" id="btn-add-credit">Adicionar crédito manualmente</button>
+      <button type="button" id="btn-remove-credit">Remover crédito manualmente</button>
+      <button type="button" id="btn-close-session">Registrar atendimento concluído</button>
+      ${verificationUi.isVerified ? "" : '<button type="button" id="btn-manual-fallback">Verificar manualmente</button>'}
     </div>
   `;
 
   profileContainer.querySelector("#btn-add-note")
     .addEventListener("click", async () => {
-      const note = prompt("Digite a observacao:");
+      const note = prompt("Digite a observação:");
       if (!note) return;
       await appendClientNotes(client.id, note);
       await loadClientProfile(client.id);
@@ -255,7 +443,7 @@ function renderClientProfile(client, profile) {
 
   profileContainer.querySelector("#btn-add-credit")
     .addEventListener("click", async () => {
-      const amount = Number(prompt("Quantos creditos adicionar?", "1"));
+      const amount = Number(prompt("Quantos créditos adicionar?", "1"));
       if (!Number.isFinite(amount) || amount <= 0) return;
       await adjustCredits(client.id, Math.floor(amount));
       await loadClientProfile(client.id);
@@ -263,7 +451,7 @@ function renderClientProfile(client, profile) {
 
   profileContainer.querySelector("#btn-remove-credit")
     .addEventListener("click", async () => {
-      const amount = Number(prompt("Quantos creditos remover?", "1"));
+      const amount = Number(prompt("Quantos créditos remover?", "1"));
       if (!Number.isFinite(amount) || amount <= 0) return;
       await adjustCredits(client.id, -Math.floor(amount));
       await loadClientProfile(client.id);
@@ -272,19 +460,110 @@ function renderClientProfile(client, profile) {
   profileContainer.querySelector("#btn-close-session")
     .addEventListener("click", async () => {
       const problemSummary = prompt("Resumo do problema:");
-      const solutionSummary = prompt("Solucao aplicada:");
+      const solutionSummary = prompt("Solução aplicada:");
       await closeLatestOpenSession(client.id, {
         problemSummary,
         solutionSummary,
-        internalNotes: "Fechado pelo painel tecnico"
+        internalNotes: "Fechado pelo painel técnico"
       });
       await loadClientProfile(client.id);
       await loadQueue();
     });
+
+  profileContainer.querySelector("#btn-verification-indicator")
+    .addEventListener("click", async () => {
+      await onVerificationIndicatorClick(client, verification, state.activeSession?.id || null);
+    });
+
+  const fallbackBtn = profileContainer.querySelector("#btn-manual-fallback");
+  if (fallbackBtn) {
+    fallbackBtn.addEventListener("click", async () => {
+      await triggerManualFallback(client, state.activeSession?.id || null);
+    });
+  }
+}
+
+async function onVerificationIndicatorClick(client, verification, supportSessionId) {
+  const ui = verificationPresentation(verification);
+  if (ui.isVerified) {
+    alert("Verificação confirmada com sucesso.");
+    return;
+  }
+
+  const shouldRunFallback = confirm("Verificação pendente/falhou/divergente. Deseja iniciar fallback manual agora?");
+  if (!shouldRunFallback) return;
+  await triggerManualFallback(client, supportSessionId);
+}
+
+async function triggerManualFallback(client, supportSessionId) {
+  try {
+    const clientUid = await resolveClientUidByClientId(client.id);
+    await triggerVerificationFromTechnician({
+      client,
+      supportSessionId,
+      clientUid,
+      manualFallback: true
+    });
+    await loadClientProfile(client.id);
+    await loadQueue();
+    alert("Fallback manual solicitado.");
+  } catch (err) {
+    console.error(err);
+    alert("Não foi possível iniciar o fallback manual.");
+  }
+}
+
+async function resolveClientUidByClientId(clientId) {
+  const linksSnap = await getDocs(
+    query(collection(db, COLLECTIONS.clientAppLinks), where("clientId", "==", clientId))
+  );
+  const first = linksSnap.docs[0];
+  if (!first) return null;
+  const data = first.data();
+  return data.clientUid || first.id;
+}
+
+async function loadVerification(clientId) {
+  const snapshot = await getDoc(doc(db, COLLECTIONS.clientVerifications, clientId));
+  if (!snapshot.exists()) return null;
+  return { id: snapshot.id, ...snapshot.data() };
+}
+
+function verificationPresentation(verification) {
+  const status = String(verification?.status || "").trim().toLowerCase();
+  if (status === PNV_STATUS.VERIFIED) {
+    return {
+      className: "ok",
+      tooltip: "Verificado",
+      isVerified: true
+    };
+  }
+
+  if (status === PNV_STATUS.MISMATCH) {
+    return {
+      className: "danger",
+      tooltip: "Divergente",
+      isVerified: false
+    };
+  }
+
+  if (status === PNV_STATUS.MANUAL_REQUIRED) {
+    return {
+      className: "danger",
+      tooltip: "Fallback manual necessário",
+      isVerified: false
+    };
+  }
+
+  return {
+    className: "danger",
+    tooltip: "Pendente ou falhou",
+    isVerified: false
+  };
 }
 
 async function loadHistory(clientId) {
-  historyList.innerHTML = "<small>Carregando historico...</small>";
+  historyList.innerHTML = "<small>Carregando histórico...</small>";
   const sessionsSnap = await getDocs(query(collection(db, COLLECTIONS.supportSessions)));
   const reportsSnap = await getDocs(query(collection(db, COLLECTIONS.supportReports)));
 
@@ -301,7 +580,7 @@ async function loadHistory(clientId) {
   );
 
   if (!sessions.length) {
-    historyList.innerHTML = "<small>Sem historico de atendimento.</small>";
+    historyList.innerHTML = "<small>Sem histórico de atendimento.</small>";
     return;
   }
 
@@ -312,11 +591,11 @@ async function loadHistory(clientId) {
     item.className = "history-item";
     item.innerHTML = `
       <strong>${formatDate(session.startedAt)} - ${session.status || "-"}</strong>
-      <div>Tecnico: ${session.techName || session.techId || "-"}</div>
+      <div>Técnico: ${session.techName || session.techId || "-"}</div>
       <div>Problema: ${session.problemSummary || "-"}</div>
-      <div>Solucao: ${session.solutionSummary || report?.solutionApplied || "-"}</div>
-      <div>Observacoes: ${session.internalNotes || report?.actionsTaken || "-"}</div>
-      <div>Gratuito: ${session.isFreeFirstSupport ? "Sim" : "Nao"} | Creditos consumidos: ${session.creditsConsumed ?? 0}</div>
+      <div>Solução: ${session.solutionSummary || report?.solutionApplied || "-"}</div>
+      <div>Observações: ${session.internalNotes || report?.actionsTaken || "-"}</div>
+      <div>Gratuito: ${session.isFreeFirstSupport ? "Sim" : "Não"} | Créditos consumidos: ${session.creditsConsumed ?? 0}</div>
     `;
     historyList.appendChild(item);
   });
@@ -332,7 +611,7 @@ async function loadOrders(clientId = null) {
     .slice(0, 40);
 
   if (!rows.length) {
-    ordersList.innerHTML = "<small>Sem pedidos de credito.</small>";
+    ordersList.innerHTML = "<small>Sem pedidos de crédito.</small>";
     return;
   }
 
@@ -344,10 +623,10 @@ async function loadOrders(clientId = null) {
     item.innerHTML = `
       <strong>${pkg?.name || order.packageId || "-"}</strong>
       <div>Cliente: ${order.clientId || "-"}</div>
-      <div>Metodo: ${order.paymentMethod || "-"}</div>
+      <div>Método: ${order.paymentMethod || "-"}</div>
       <div>Status: ${order.status || "-"}</div>
       <div>Valor: ${formatMoney(order.amountCents || 0)}</div>
-      <div>WhatsApp: ${order.whatsappRequested ? "Sim" : "Nao"}</div>
+      <div>WhatsApp: ${order.whatsappRequested ? "Sim" : "Não"}</div>
     `;
     ordersList.appendChild(item);
   });
@@ -365,6 +644,7 @@ async function registerOrUpdateClient(payload) {
     const credits = Number(oldData.credits ?? 0);
     const supportsUsed = Number(oldData.supportsUsed ?? 0);
     const freeUsed = Boolean(oldData.freeFirstSupportUsed ?? false);
+
     tx.set(clientRef, {
       phone: payload.phone,
       name: payload.name,
@@ -392,7 +672,9 @@ async function registerOrUpdateClient(payload) {
       }, { merge: true });
     }
   });
-  return clientId;
+
+  const snapshot = await getDoc(clientRef);
+  return { id: snapshot.id, ...snapshot.data() };
 }
 
 async function appendClientNotes(clientId, note) {
@@ -435,7 +717,7 @@ async function closeLatestOpenSession(clientId, payload) {
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
 
   if (!latest) {
-    alert("Nenhuma sessao aberta encontrada para este cliente.");
+    alert("Nenhuma sessão aberta encontrada para este cliente.");
     return;
   }
 
@@ -501,7 +783,7 @@ async function closeLatestOpenSession(clientId, payload) {
   await addDoc(collection(db, COLLECTIONS.supportReports), {
     sessionId: latest.id,
     clientId,
-    techId: null,
+    techId: auth.currentUser?.uid || null,
     createdAt: now,
     summary: payload.problemSummary || null,
     actionsTaken: payload.internalNotes || null,
@@ -539,4 +821,13 @@ function formatMoney(cents) {
     style: "currency",
     currency: "BRL"
   }).format((Number(cents) || 0) / 100);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }

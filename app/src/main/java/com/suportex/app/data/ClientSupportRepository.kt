@@ -9,6 +9,7 @@ import com.suportex.app.data.model.ClientFinancialStatus
 import com.suportex.app.data.model.ClientHomeSnapshot
 import com.suportex.app.data.model.ClientMetaRecord
 import com.suportex.app.data.model.ClientRecord
+import com.suportex.app.data.model.ClientVerificationRecord
 import com.suportex.app.data.model.CreditOrderRecord
 import com.suportex.app.data.model.CreditPackageRecord
 import com.suportex.app.data.model.SupportAccessDecision
@@ -24,6 +25,9 @@ class ClientSupportRepository(
 ) {
     private val clients = db.collection("clients")
     private val clientProfiles = db.collection("client_profiles")
+    private val clientAppLinks = db.collection("client_app_links")
+    private val clientVerifications = db.collection("client_verifications")
+    private val pnvRequests = db.collection("pnv_requests")
     private val supportSessions = db.collection("support_sessions")
     private val supportReports = db.collection("support_reports")
     private val creditPackages = db.collection("credit_packages")
@@ -57,51 +61,68 @@ class ClientSupportRepository(
         return SupportBillingConfig.defaultCreditPackages
     }
 
-    suspend fun loadHomeSnapshot(rawPhone: String?): ClientHomeSnapshot {
+    suspend fun loadHomeSnapshot(
+        clientUid: String?,
+        rawPhone: String?
+    ): ClientHomeSnapshot {
         authRepository.ensureAnonAuth()
         val packages = listCreditPackages()
         val normalizedPhone = normalizePhone(rawPhone)
-        if (normalizedPhone == null) {
-            return ClientHomeSnapshot(
-                phone = null,
-                client = null,
-                clientMeta = null,
-                packages = packages
-            )
-        }
-
-        val clientDocId = clientDocIdFromPhone(normalizedPhone)
-        val client = clients.document(clientDocId).get().await().toClientRecord()
+        val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+        val client = resolvedClient?.client
         val meta = if (client != null) {
             clientProfiles.document(client.id).get().await().toClientMetaRecord(client.id)
         } else {
             null
         }
+        val verification = if (client != null) {
+            syncVerificationStatus(
+                client = client,
+                clientUid = clientUid,
+                verifiedPhone = normalizedPhone
+            )
+        } else {
+            null
+        }
 
         return ClientHomeSnapshot(
-            phone = normalizedPhone,
+            clientUid = clientUid,
+            phone = normalizedPhone ?: client?.phone,
             client = client,
             clientMeta = meta,
+            verification = verification,
             packages = packages
         )
     }
 
-    suspend fun evaluateSupportAccess(rawPhone: String, displayName: String?): SupportAccessDecision {
+    suspend fun evaluateSupportAccess(
+        clientUid: String?,
+        fallbackVerifiedPhone: String?
+    ): SupportAccessDecision {
         authRepository.ensureAnonAuth()
-        val normalizedPhone = normalizePhone(rawPhone) ?: return SupportAccessDecision.NeedsPhone
-        val clientResult = ensureClientByPhone(
-            normalizedPhone = normalizedPhone,
-            displayName = displayName
-        )
-
-        val client = clientResult.client
+        val normalizedPhone = normalizePhone(fallbackVerifiedPhone)
+        val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+        val client = resolvedClient?.client
+        if (client == null) {
+            return SupportAccessDecision.Allowed(
+                startContext = SupportStartContext(
+                    clientId = null,
+                    phone = normalizedPhone,
+                    isNewClient = true,
+                    isFreeFirstSupport = true,
+                    creditsToConsume = 0
+                ),
+                financialStatus = ClientFinancialStatus.UNREGISTERED_NEW_CLIENT,
+                client = null
+            )
+        }
         val freePending = !client.freeFirstSupportUsed
         if (freePending) {
             return SupportAccessDecision.Allowed(
                 startContext = SupportStartContext(
                     clientId = client.id,
-                    phone = normalizedPhone,
-                    isNewClient = clientResult.isNewClient,
+                    phone = client.phone.takeIf { it.isNotBlank() } ?: normalizedPhone,
+                    isNewClient = false,
                     isFreeFirstSupport = true,
                     creditsToConsume = 0
                 ),
@@ -114,8 +135,8 @@ class ClientSupportRepository(
             return SupportAccessDecision.Allowed(
                 startContext = SupportStartContext(
                     clientId = client.id,
-                    phone = normalizedPhone,
-                    isNewClient = clientResult.isNewClient,
+                    phone = client.phone.takeIf { it.isNotBlank() } ?: normalizedPhone,
+                    isNewClient = false,
                     isFreeFirstSupport = false,
                     creditsToConsume = 1
                 ),
@@ -153,6 +174,7 @@ class ClientSupportRepository(
             "status" to "queued",
             "isFreeFirstSupport" to startContext.isFreeFirstSupport,
             "creditsConsumed" to startContext.creditsToConsume,
+            "requiresTechnicianRegistration" to (startContext.clientId == null),
             "problemSummary" to null,
             "solutionSummary" to null,
             "internalNotes" to null,
@@ -258,6 +280,15 @@ class ClientSupportRepository(
                 "name" to name,
                 "primaryEmail" to primaryEmail,
                 "notes" to notes,
+                "updatedAt" to now
+            ),
+            SetOptions.merge()
+        ).await()
+        clientVerifications.document(ensured.client.id).set(
+            mapOf(
+                "clientId" to ensured.client.id,
+                "primaryPhone" to normalizedPhone,
+                "status" to VERIFICATION_STATUS_PENDING,
                 "updatedAt" to now
             ),
             SetOptions.merge()
@@ -536,6 +567,168 @@ class ClientSupportRepository(
         }.await()
     }
 
+    private suspend fun resolveClientForApp(
+        clientUid: String?,
+        normalizedPhone: String?
+    ): ResolvedClientResult? {
+        val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+
+        if (sanitizedUid != null) {
+            val linkedClient = resolveLinkedClientByUid(sanitizedUid)
+            if (linkedClient != null) return ResolvedClientResult(client = linkedClient)
+
+            val pendingRequest = fetchLatestPendingPnvRequest(sanitizedUid)
+            val requestedClientId = pendingRequest?.getString("clientId")
+            if (!requestedClientId.isNullOrBlank()) {
+                val requestedClient = clients.document(requestedClientId).get().await().toClientRecord()
+                if (requestedClient != null) {
+                    upsertClientAppLink(
+                        clientUid = sanitizedUid,
+                        clientId = requestedClient.id,
+                        phone = requestedClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone
+                    )
+                    return ResolvedClientResult(client = requestedClient)
+                }
+            }
+        }
+
+        if (normalizedPhone != null) {
+            val byPhone = clients.document(clientDocIdFromPhone(normalizedPhone)).get().await().toClientRecord()
+            if (byPhone != null) {
+                if (sanitizedUid != null) {
+                    upsertClientAppLink(
+                        clientUid = sanitizedUid,
+                        clientId = byPhone.id,
+                        phone = normalizedPhone
+                    )
+                }
+                return ResolvedClientResult(client = byPhone)
+            }
+        }
+
+        return null
+    }
+
+    private suspend fun resolveLinkedClientByUid(clientUid: String): ClientRecord? {
+        val linkSnapshot = clientAppLinks.document(clientUid).get().await()
+        val clientId = linkSnapshot.getString("clientId")?.takeIf { it.isNotBlank() } ?: return null
+        return clients.document(clientId).get().await().toClientRecord()
+    }
+
+    private suspend fun upsertClientAppLink(
+        clientUid: String,
+        clientId: String,
+        phone: String?
+    ) {
+        val now = System.currentTimeMillis()
+        clientAppLinks.document(clientUid).set(
+            mapOf(
+                "clientUid" to clientUid,
+                "clientId" to clientId,
+                "phone" to phone,
+                "updatedAt" to now,
+                "createdAt" to now
+            ),
+            SetOptions.merge()
+        ).await()
+    }
+
+    private suspend fun syncVerificationStatus(
+        client: ClientRecord,
+        clientUid: String?,
+        verifiedPhone: String?
+    ): ClientVerificationRecord {
+        val now = System.currentTimeMillis()
+        val primaryPhone = normalizePhone(client.phone) ?: client.phone
+        val normalizedVerifiedPhone = normalizePhone(verifiedPhone)
+        val verificationRef = clientVerifications.document(client.id)
+        val currentSnapshot = verificationRef.get().await()
+        val currentStatus = currentSnapshot.getString("status") ?: VERIFICATION_STATUS_PENDING
+        var nextStatus = currentStatus
+        var mismatchReason = currentSnapshot.getString("mismatchReason")
+        var shouldWrite = !currentSnapshot.exists()
+
+        if (normalizedVerifiedPhone != null && primaryPhone.isNotBlank()) {
+            if (normalizedVerifiedPhone == primaryPhone) {
+                nextStatus = VERIFICATION_STATUS_VERIFIED
+                mismatchReason = null
+            } else {
+                nextStatus = VERIFICATION_STATUS_MISMATCH
+                mismatchReason = "phone_divergent"
+            }
+            shouldWrite = true
+        }
+
+        val pendingRequest = clientUid
+            ?.takeIf { it.isNotBlank() }
+            ?.let { fetchLatestPendingPnvRequest(it) }
+        val pendingRequestClientId = pendingRequest?.getString("clientId")
+        val requestTargetsCurrentClient = pendingRequest != null &&
+            (pendingRequestClientId.isNullOrBlank() || pendingRequestClientId == client.id)
+        if (requestTargetsCurrentClient &&
+            normalizedVerifiedPhone == null &&
+            nextStatus != VERIFICATION_STATUS_VERIFIED
+        ) {
+            nextStatus = if (pendingRequest?.getBoolean("manualFallback") == true) {
+                VERIFICATION_STATUS_MANUAL_REQUIRED
+            } else {
+                VERIFICATION_STATUS_PENDING
+            }
+            shouldWrite = true
+        }
+
+        if (shouldWrite || requestTargetsCurrentClient) {
+            val payload = mutableMapOf<String, Any?>(
+                "clientId" to client.id,
+                "primaryPhone" to primaryPhone,
+                "verifiedPhone" to normalizedVerifiedPhone,
+                "status" to nextStatus,
+                "lastVerificationAt" to now,
+                "updatedAt" to now
+            )
+            payload["mismatchReason"] = mismatchReason
+            verificationRef.set(
+                payload.filterValues { it != null },
+                SetOptions.merge()
+            ).await()
+        }
+
+        if (requestTargetsCurrentClient) {
+            pendingRequest?.reference?.set(
+                mapOf(
+                    "status" to PNV_REQUEST_STATUS_PROCESSED,
+                    "processedAt" to now,
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )?.await()
+        }
+
+        return verificationRef.get().await()
+            .toClientVerificationRecord(client.id, primaryPhone)
+            ?: ClientVerificationRecord(
+                clientId = client.id,
+                primaryPhone = primaryPhone,
+                verifiedPhone = normalizedVerifiedPhone,
+                status = nextStatus,
+                lastVerificationAt = now,
+                updatedAt = now
+            )
+    }
+
+    private suspend fun fetchLatestPendingPnvRequest(clientUid: String): DocumentSnapshot? {
+        val snapshot = pnvRequests
+            .whereEqualTo("clientUid", clientUid)
+            .get()
+            .await()
+        return snapshot.documents
+            .filter { doc ->
+                val status = doc.getString("status") ?: PNV_REQUEST_STATUS_PENDING
+                status == PNV_REQUEST_STATUS_PENDING || status == PNV_REQUEST_STATUS_MANUAL_PENDING
+            }
+            .maxByOrNull { it.getLong("createdAt") ?: 0L }
+    }
+
     private suspend fun resolveSupportSessionRef(
         localSupportSessionId: String?,
         realtimeSessionId: String?
@@ -618,6 +811,21 @@ class ClientSupportRepository(
         )
     }
 
+    private fun DocumentSnapshot.toClientVerificationRecord(
+        defaultClientId: String,
+        defaultPrimaryPhone: String?
+    ): ClientVerificationRecord? {
+        if (!exists()) return null
+        return ClientVerificationRecord(
+            clientId = getString("clientId") ?: defaultClientId,
+            primaryPhone = getString("primaryPhone") ?: defaultPrimaryPhone,
+            verifiedPhone = getString("verifiedPhone"),
+            status = getString("status") ?: VERIFICATION_STATUS_PENDING,
+            lastVerificationAt = getLong("lastVerificationAt"),
+            updatedAt = getLong("updatedAt")
+        )
+    }
+
     private fun DocumentSnapshot.toCreditPackageRecord(): CreditPackageRecord? {
         if (!exists()) return null
         return CreditPackageRecord(
@@ -653,11 +861,26 @@ class ClientSupportRepository(
         val isNewClient: Boolean
     )
 
+    private data class ResolvedClientResult(
+        val client: ClientRecord
+    )
+
     private data class CompletionTransactionResult(
         val completed: Boolean,
         val sessionId: String?,
         val clientId: String?
     )
+
+    private companion object {
+        const val VERIFICATION_STATUS_PENDING = "pending"
+        const val VERIFICATION_STATUS_VERIFIED = "verified"
+        const val VERIFICATION_STATUS_MISMATCH = "mismatch"
+        const val VERIFICATION_STATUS_MANUAL_REQUIRED = "manual_required"
+
+        const val PNV_REQUEST_STATUS_PENDING = "pending"
+        const val PNV_REQUEST_STATUS_MANUAL_PENDING = "manual_pending"
+        const val PNV_REQUEST_STATUS_PROCESSED = "processed"
+    }
 }
 
 private suspend fun <T> Task<T>.await(): T =

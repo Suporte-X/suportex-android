@@ -8,6 +8,7 @@
   --danger: #d83838;
   --ok: #1f8f49;
   --warn: #d98f05;
+  --active: #6748d8;
 }
 
 * {
@@ -69,11 +70,30 @@ body {
   box-shadow: 0 8px 22px rgba(17, 31, 62, 0.05);
 }
 
-.queue-panel { grid-column: span 4; }
-.register-panel { grid-column: span 4; }
-.profile-panel { grid-column: span 4; }
-.history-panel { grid-column: span 8; }
-.credit-orders-panel { grid-column: span 4; }
+.queue-panel {
+  grid-column: span 5;
+}
+
+.intake-panel {
+  grid-column: span 3;
+}
+
+.intake-panel.is-active {
+  border-color: var(--primary);
+  box-shadow: 0 10px 26px rgba(14, 116, 255, 0.2);
+}
+
+.profile-panel {
+  grid-column: span 4;
+}
+
+.history-panel {
+  grid-column: span 8;
+}
+
+.credit-orders-panel {
+  grid-column: span 4;
+}
 
 .panel-title h2 {
   margin: 0;
@@ -111,6 +131,13 @@ body {
   background: #fff6f6;
 }
 
+.queue-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
 .queue-meta {
   display: flex;
   flex-wrap: wrap;
@@ -143,6 +170,18 @@ body {
   color: #8d1f1f;
   background: #ffdfdf;
   border-color: #f0b4b4;
+}
+
+.badge.neutral {
+  color: #1f4064;
+  background: #e8f1ff;
+  border-color: #bad1f7;
+}
+
+.badge.active {
+  color: #3d238f;
+  background: #efe9ff;
+  border-color: #cec2f8;
 }
 
 form {
@@ -183,6 +222,16 @@ button {
   background: var(--primary);
   color: #fff;
   font-weight: 600;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.intake-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
 }
 
 .search-row {
@@ -234,9 +283,34 @@ button {
   text-align: left;
 }
 
-@media (max-width: 1100px) {
+.queue-actions {
+  margin-top: 10px;
+}
+
+.verification-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  padding: 0;
+  min-width: 16px;
+  min-height: 16px;
+  display: inline-block;
+}
+
+.verification-dot.ok {
+  background: #2da65f;
+  border-color: #1f8f49;
+}
+
+.verification-dot.danger {
+  background: #d83838;
+  border-color: #b52c2c;
+}
+
+@media (max-width: 1200px) {
   .queue-panel,
-  .register-panel,
+  .intake-panel,
   .profile-panel,
   .history-panel,
   .credit-orders-panel {

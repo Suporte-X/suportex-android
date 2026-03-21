@@ -54,6 +54,7 @@ import java.util.Locale
 fun SupportHomeScreen(
     homeSnapshot: ClientHomeSnapshot,
     onRequestSupport: () -> Unit,
+    onBlockedSupportRequest: () -> Unit,
     onOpenPurchase: () -> Unit,
     onOpenHelp: () -> Unit,
     onOpenPrivacy: () -> Unit,
@@ -62,10 +63,12 @@ fun SupportHomeScreen(
 ) {
     var expandedPlans by rememberSaveable { mutableStateOf(false) }
     val clientName = homeSnapshot.client?.name
-    val firstSupportText = if (homeSnapshot.freeFirstSupportPending || homeSnapshot.client == null) {
-        "Primeiro atendimento gratis disponivel"
+    val isRegisteredClient = homeSnapshot.isRegisteredClient
+    val supportBlockedByCredits = homeSnapshot.isRegisteredWithoutCredit
+    val firstSupportText = if (homeSnapshot.freeFirstSupportPending) {
+        "Primeiro atendimento grátis disponível"
     } else {
-        "Primeiro atendimento gratis ja utilizado"
+        "Primeiro atendimento grátis já utilizado"
     }
 
     Column(
@@ -82,66 +85,82 @@ fun SupportHomeScreen(
         )
         Spacer(Modifier.height(72.dp))
         Button(
-            onClick = onRequestSupport,
+            onClick = {
+                if (supportBlockedByCredits) {
+                    onBlockedSupportRequest()
+                } else {
+                    onRequestSupport()
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(64.dp),
-            shape = RoundedCornerShape(20.dp)
+            shape = RoundedCornerShape(20.dp),
+            colors = if (supportBlockedByCredits) {
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFC8CDD5),
+                    contentColor = Color(0xFF5E6269)
+                )
+            } else {
+                ButtonDefaults.buttonColors()
+            }
         ) {
             Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold)
         }
 
-        Spacer(Modifier.height(14.dp))
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 1.dp
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        "Creditos disponiveis: ${homeSnapshot.creditsAvailable} atendimentos",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Icon(
-                        imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                        contentDescription = if (expandedPlans) "Fechar planos" else "Abrir planos",
-                        modifier = Modifier
-                            .clickable { expandedPlans = !expandedPlans }
-                            .padding(2.dp)
-                    )
-                }
+        if (isRegisteredClient) {
+            Spacer(Modifier.height(14.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 1.dp
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            "Créditos disponíveis: ${homeSnapshot.creditsAvailable} atendimentos",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Icon(
+                            imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (expandedPlans) "Fechar planos" else "Abrir planos",
+                            modifier = Modifier
+                                .clickable { expandedPlans = !expandedPlans }
+                                .padding(2.dp)
+                        )
+                    }
 
-                if (!clientName.isNullOrBlank()) {
-                    Spacer(Modifier.height(6.dp))
+                    if (!clientName.isNullOrBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Cliente: $clientName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textMuted
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Cliente: $clientName",
+                        text = firstSupportText,
                         style = MaterialTheme.typography.bodySmall,
                         color = textMuted
                     )
-                }
 
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = firstSupportText,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = textMuted
-                )
-
-                if (expandedPlans) {
-                    Spacer(Modifier.height(10.dp))
-                    CreditPackagesTable(packages = homeSnapshot.packages)
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(
-                        onClick = onOpenPurchase,
-                        modifier = Modifier.align(Alignment.End)
-                    ) {
-                        Text("Comprar mais")
+                    if (expandedPlans) {
+                        Spacer(Modifier.height(10.dp))
+                        CreditPackagesTable(packages = homeSnapshot.packages)
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(
+                            onClick = onOpenPurchase,
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Comprar mais créditos")
+                        }
                     }
                 }
             }
@@ -149,7 +168,7 @@ fun SupportHomeScreen(
 
         Spacer(Modifier.height(16.dp))
         Text(
-            "Tempo medio de atendimento: 2-5 min",
+            "Tempo médio de atendimento: 2-5 min",
             color = textMuted,
             fontSize = 16.sp
         )
@@ -185,7 +204,7 @@ fun PurchaseCreditsScreen(
         TextButton(onClick = onBack) { Text("Voltar") }
         Spacer(Modifier.height(8.dp))
         Text(
-            "Adicionar creditos",
+            "Adicionar créditos",
             fontWeight = FontWeight.Bold,
             fontSize = 24.sp
         )
@@ -227,7 +246,7 @@ fun PurchaseCreditsScreen(
                 .fillMaxWidth()
                 .height(52.dp)
         ) {
-            Text("Pagar com cartao")
+            Text("Pagar com cartão")
         }
         Spacer(Modifier.height(10.dp))
         OutlinedButton(
@@ -256,7 +275,7 @@ fun CardPlaceholderScreen(
     onBack: () -> Unit
 ) {
     PaymentPlaceholderScreen(
-        title = "Pagamento com cartao",
+        title = "Pagamento com cartão",
         description = "Em breve",
         onBack = onBack
     )
@@ -278,7 +297,7 @@ fun PixPlaceholderScreen(
         Spacer(Modifier.height(8.dp))
         Text(
             text = selectedPlan?.let { "Plano escolhido: ${it.name} (${it.priceLabel()})" }
-                ?: "Plano nao selecionado",
+                ?: "Plano não selecionado",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(20.dp))
@@ -291,7 +310,7 @@ fun PixPlaceholderScreen(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                "Area reservada para QR Code PIX",
+                "Área reservada para QR Code PIX",
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -305,7 +324,7 @@ fun PixPlaceholderScreen(
                 .padding(12.dp)
         ) {
             Text(
-                "Area reservada para codigo copia e cola",
+                "Área reservada para código copia e cola",
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -325,11 +344,11 @@ fun PhoneIdentityDialog(
     var name by remember { mutableStateOf(initialName) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Identificacao rapida") },
+        title = { Text("Identificação rápida") },
         text = {
             Column {
                 Text(
-                    "Informe seu telefone para identificar seus creditos. Nao precisa senha."
+                    "Informe seu telefone para identificar seus créditos. Não precisa senha."
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
@@ -372,7 +391,7 @@ private fun CreditPackagesTable(packages: List<CreditPackageRecord>) {
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Plano", fontWeight = FontWeight.Bold)
-            Text("Preco", fontWeight = FontWeight.Bold)
+            Text("Preço", fontWeight = FontWeight.Bold)
         }
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
         packages.sortedBy { it.displayOrder }.forEach { plan ->
