@@ -1,7 +1,0 @@
-services:
-  - type: static
-    name: suportex-tech-panel
-    rootDir: tech-panel
-    buildCommand: ""
-    staticPublishPath: .
-    pullRequestPreviewsEnabled: false
