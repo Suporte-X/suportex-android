@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var mediaProjectionManager: MediaProjectionManager
 
-    // (mantido sÃƒÆ’Ã‚Â³ para cancelar request por HTTP, se desejar)
+    // (mantido so para cancelar request por HTTP, se desejar)
     private val http = OkHttpClient()
 
     private val sessionRepository = SessionRepository()
@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
     private val phoneIdentityProvider = FirebasePhoneIdentityProvider()
     private val supportFlowFlags = SupportFlowFlags()
 
-    // Bridges Activity -> Compose (jÃƒÆ’Ã‚Â¡ existiam)
+    // Bridges Activity -> Compose (ja existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
     private var setSystemMessageFromLauncher: ((String?) -> Unit)? = null
 
@@ -217,7 +217,7 @@ class MainActivity : ComponentActivity() {
                 sessionRepository.bindClient(sessionId)
                 sessionRepository.startSession(sessionId, clientInfo, techInfo)
             }.onFailure { err ->
-                Log.e("SXS/Main", "Falha ao registrar inÃƒÆ’Ã‚Â­cio da sessÃƒÆ’Ã‚Â£o $sessionId", err)
+                Log.e("SXS/Main", "Falha ao registrar inicio da sessao $sessionId", err)
             }
         }
     }
@@ -252,23 +252,23 @@ class MainActivity : ComponentActivity() {
         }
 
         val message = """
-            Para que o suporte tÃƒÆ’Ã‚Â©cnico possa ser realizado, o aplicativo Suporte X pode solicitar permissÃƒÆ’Ã‚Âµes temporÃƒÆ’Ã‚Â¡rias como:
+            Para que o suporte tecnico possa ser realizado, o aplicativo Suporte X pode solicitar permissoes temporarias como:
             
-            ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ compartilhamento de tela
-            ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ acesso assistido ao dispositivo
-            ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ envio de arquivos e informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes tÃƒÆ’Ã‚Â©cnicas
+            - compartilhamento de tela
+            - acesso assistido ao dispositivo
+            - envio de arquivos e informacoes tecnicas
             
-            Essas permissÃƒÆ’Ã‚Âµes sÃƒÆ’Ã‚Â£o utilizadas exclusivamente durante a sessÃƒÆ’Ã‚Â£o de suporte tÃƒÆ’Ã‚Â©cnico.
+            Essas permissoes sao utilizadas exclusivamente durante a sessao de suporte tecnico.
             
-            O acesso remoto somente serÃƒÆ’Ã‚Â¡ iniciado apÃƒÆ’Ã‚Â³s sua autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o explÃƒÆ’Ã‚Â­cita e pode ser interrompido a qualquer momento diretamente no aplicativo.
+            O acesso remoto somente sera iniciado apos sua autorizacao explicita e pode ser interrompido a qualquer momento diretamente no aplicativo.
             
-            Nenhuma aÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o serÃƒÆ’Ã‚Â¡ realizada no dispositivo sem a autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do usuÃƒÆ’Ã‚Â¡rio.
+            Nenhuma acao sera realizada no dispositivo sem a autorizacao do usuario.
             
-            Ao continuar, vocÃƒÆ’Ã‚Âª confirma que estÃƒÆ’Ã‚Â¡ solicitando suporte tÃƒÆ’Ã‚Â©cnico e autoriza temporariamente o acesso necessÃƒÆ’Ã‚Â¡rio para a realizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do atendimento.
+            Ao continuar, voce confirma que esta solicitando suporte tecnico e autoriza temporariamente o acesso necessario para a realizacao do atendimento.
         """.trimIndent()
 
         android.app.AlertDialog.Builder(this)
-            .setTitle("AutorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de Acesso Remoto")
+            .setTitle("Autorizacao de Acesso Remoto")
             .setMessage(message)
             .setCancelable(true)
             .setNegativeButton("Cancelar") { dialog, _ ->
@@ -287,9 +287,7 @@ class MainActivity : ComponentActivity() {
             ensureRemoteAccessConsent {
                 if (!isAccessibilityServiceEnabled()) {
                     openAccessibilitySettings()
-                    setSystemMessageFromLauncher?.invoke(
-                        "Ative em Acessibilidade ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ SuporteX ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Ativar para permitir o controle remoto."
-                    )
+                    setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > SuporteX > Ativar para permitir o controle remoto.")
                 }
                 updateRemoteState(enabled = true, origin = "client")
                 sendCommand("remote_enable")
@@ -455,7 +453,7 @@ class MainActivity : ComponentActivity() {
                         updateSharingState(active = false, origin = "system")
                     }
                     if (shouldStartFlow) runOnUiThread {
-                        setSystemMessageFromLauncher?.invoke("O tÃƒÆ’Ã‚Â©cnico solicitou iniciar o compartilhamento de tela.")
+                        setSystemMessageFromLauncher?.invoke("O tecnico solicitou iniciar o compartilhamento de tela.")
                         startScreenShareFlow(fromCommand = true)
                     }
                 }
@@ -468,13 +466,13 @@ class MainActivity : ComponentActivity() {
                 if (!remoteEnabledActive) {
                     runOnUiThread {
                         setSystemMessageFromLauncher?.invoke(
-                            "O tÃƒÆ’Ã‚Â©cnico solicitou acesso remoto. Ative \"Permitir Acesso Remoto\" para continuar."
+                            "O tecnico solicitou acesso remoto. Ative \"Permitir Acesso Remoto\" para continuar."
                         )
                     }
                 }
             }
             "remote_disable", "remote_revoke" -> updateRemoteState(enabled = false, origin = "tech")
-            // A chamada agora ÃƒÆ’Ã‚Â© dirigida pelo VoiceCallManager (Firestore/WebRTC),
+            // A chamada agora e dirigida pelo VoiceCallManager (Firestore/WebRTC),
             // evitando conflito de estado com comandos legados.
             "call_start", "call_end" -> Unit
             "session_end", "end" -> handleSessionEnded(reason = obj.optString("reason", "Atendimento encerrado."))
@@ -510,7 +508,7 @@ class MainActivity : ComponentActivity() {
     private fun handleAttachmentPick(uri: Uri) {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
-            setSystemMessageFromLauncher?.invoke("SessÃƒÆ’Ã‚Â£o ainda nÃƒÆ’Ã‚Â£o aceita pelo tÃƒÆ’Ã‚Â©cnico.")
+            setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
             return
         }
         lifecycleScope.launch(Dispatchers.IO) {
@@ -530,7 +528,7 @@ class MainActivity : ComponentActivity() {
     private fun startAudioRecording() {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
-            setSystemMessageFromLauncher?.invoke("SessÃƒÆ’Ã‚Â£o ainda nÃƒÆ’Ã‚Â£o aceita pelo tÃƒÆ’Ã‚Â©cnico.")
+            setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
             return
         }
         runCatching {
@@ -548,12 +546,12 @@ class MainActivity : ComponentActivity() {
             }
             mediaRecorder = recorder
             setRecordingAudioFromActivity?.invoke(true)
-            setSystemMessageFromLauncher?.invoke("Gravando ÃƒÆ’Ã‚Â¡udioÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ Toque novamente para enviar.")
+            setSystemMessageFromLauncher?.invoke("Gravando audio... Toque novamente para enviar.")
         }.onFailure {
             mediaRecorder = null
             audioTempFile = null
             setRecordingAudioFromActivity?.invoke(false)
-            setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de ÃƒÆ’Ã‚Â¡udio.")
+            setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
         }
     }
 
@@ -575,7 +573,7 @@ class MainActivity : ComponentActivity() {
 
         val file = outFile
         if (file == null || !file.exists()) {
-            setSystemMessageFromLauncher?.invoke("Arquivo de ÃƒÆ’Ã‚Â¡udio nÃƒÆ’Ã‚Â£o encontrado.")
+            setSystemMessageFromLauncher?.invoke("Arquivo de audio nao encontrado.")
             return
         }
 
@@ -585,9 +583,9 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread {
                 if (result.isSuccess) {
-                    setSystemMessageFromLauncher?.invoke("Ãudio enviado.")
+                    setSystemMessageFromLauncher?.invoke("Audio enviado.")
                 } else {
-                    setSystemMessageFromLauncher?.invoke("Falha ao enviar Ã¡udio.")
+                    setSystemMessageFromLauncher?.invoke("Falha ao enviar audio.")
                 }
             }
             runCatching { file.delete() }
@@ -678,7 +676,7 @@ class MainActivity : ComponentActivity() {
                     "x-id-token" to listOf(idToken)
                 )
             }
-            // server.js jÃƒÆ’Ã‚Â¡ tem allowEIO3: true
+            // server.js ja tem allowEIO3: true
         }
         socket = IO.socket(Conn.SERVER_BASE, opts)
         Conn.socket = socket
@@ -697,11 +695,11 @@ class MainActivity : ComponentActivity() {
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
 
-        // tÃƒÆ’Ã‚Â©cnico aceitou ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ recebemos sessionId e (opcional) techName
+        // tecnico aceitou -> recebemos sessionId e (opcional) techName
         socket.on("support:accepted") { args ->
             val data = args.getOrNull(0) as? JSONObject ?: return@on
             val sid = data.optString("sessionId", "")
-            val tname = data.optString("techName", "TÃƒÆ’Ã‚Â©cnico")
+            val tname = data.optString("techName", "Tecnico")
             if (sid.isBlank()) return@on
 
             Conn.sessionId = sid
@@ -929,7 +927,7 @@ class MainActivity : ComponentActivity() {
         return "R$ $reais,$cents"
     }
 
-    // Cancelar (opcional) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ pelo endpoint HTTP do servidor
+    // Cancelar (opcional) pelo endpoint HTTP do servidor
     private fun cancelRequest(requestId: String, onDone: () -> Unit = {}) {
         val localSupportId = pendingSupportSessionId
         if (!localSupportId.isNullOrBlank()) {
@@ -954,7 +952,7 @@ class MainActivity : ComponentActivity() {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
             shareRequestFromCommand = false
-            setSystemMessageFromLauncher?.invoke("SessÃƒÆ’Ã‚Â£o ainda nÃƒÆ’Ã‚Â£o aceita pelo tÃƒÆ’Ã‚Â©cnico.")
+            setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
             return
         }
         if (isSharingActive && !isScreenCaptureServiceRunning()) {
@@ -980,7 +978,7 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == RESULT_OK && result.data != null) {
                 val sid = currentSessionId
                 if (sid.isNullOrBlank()) {
-                    setSystemMessageFromLauncher?.invoke("SessÃƒÆ’Ã‚Â£o ainda nÃƒÆ’Ã‚Â£o aceita pelo tÃƒÆ’Ã‚Â©cnico.")
+                    setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
                     return@registerForActivityResult
                 }
                 val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
@@ -994,7 +992,7 @@ class MainActivity : ComponentActivity() {
                 updateSharingState(active = true, origin = origin)
                 shareRequestFromCommand = false
             } else {
-                setSystemMessageFromLauncher?.invoke("PermissÃƒÆ’Ã‚Â£o de captura negada.")
+                setSystemMessageFromLauncher?.invoke("Permissao de captura negada.")
                 shareRequestFromCommand = false
             }
         }
@@ -1024,7 +1022,7 @@ class MainActivity : ComponentActivity() {
                 pendingAudioAction = null
             } else {
                 pendingAudioAction = null
-                setSystemMessageFromLauncher?.invoke("PermissÃƒÆ’Ã‚Â£o de microfone negada.")
+                setSystemMessageFromLauncher?.invoke("Permissao de microfone negada.")
             }
         }
 
@@ -1057,7 +1055,7 @@ class MainActivity : ComponentActivity() {
             onUpdate = ::handleCallUpdate
         )
 
-        connectSocket() // ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒâ€¦Ã¢â‚¬â„¢ conecta o Socket.IO assim que abrir o app
+        connectSocket() // conecta o Socket.IO assim que abrir o app
 
         setContent {
             val brandPrimary = Color(0xFFFFCB19)
@@ -1185,7 +1183,7 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Toast.makeText(
                                         this@MainActivity,
-                                        "Sem crÃƒÆ’Ã‚Â©dito disponÃƒÆ’Ã‚Â­vel",
+                                        "Sem credito disponivel",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                     return@SupportHomeScreen
@@ -1215,7 +1213,7 @@ class MainActivity : ComponentActivity() {
                                             selectedPackage = decision.packages.firstOrNull()
                                             Toast.makeText(
                                                 this@MainActivity,
-                                                "Sem crÃƒÆ’Ã‚Â©dito disponÃƒÆ’Ã‚Â­vel",
+                                                "Sem credito disponivel",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }
@@ -1225,7 +1223,7 @@ class MainActivity : ComponentActivity() {
                             onBlockedSupportRequest = {
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Sem crÃƒÆ’Ã‚Â©dito disponÃƒÆ’Ã‚Â­vel",
+                                    "Sem credito disponivel",
                                     Toast.LENGTH_SHORT
                                 ).show()
                             },
@@ -1315,7 +1313,7 @@ class MainActivity : ComponentActivity() {
                                 currentSessionId = null
                                 current = Screen.HOME
                             },
-                            onAccepted = { /* nÃƒÆ’Ã‚Â£o usamos; aceitaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o vem do socket */ },
+                            onAccepted = { /* nao usamos; aceitacao vem do socket */ },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -1352,7 +1350,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onAttachmentClick = {
                                 if (sessionId == null) {
-                                    systemMessage = "SessÃƒÆ’Ã‚Â£o ainda nÃƒÆ’Ã‚Â£o aceita pelo tÃƒÆ’Ã‚Â©cnico."
+                                    systemMessage = "Sessao ainda nao aceita pelo tecnico."
                                 } else {
                                     attachmentPickerLauncher.launch("image/*")
                                 }
@@ -1410,24 +1408,15 @@ private fun HomeScreen(
             shape = RoundedCornerShape(20.dp)
         ) { Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(16.dp))
-        Text("Tempo mÃƒÆ’Ã‚Â©dio de atendimento: 2ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“5 min", color = textMuted, fontSize = 16.sp)
+        Text("Tempo medio de atendimento: 2-5 min", color = textMuted, fontSize = 16.sp)
         Spacer(Modifier.weight(1f))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Ajuda", color = textMuted,
-                modifier = Modifier.clickable {
-                    onOpenHelp()
-                })
-            Text("  ·  ", color = textMuted)
-            Text("Privacidade", color = textMuted,
-                modifier = Modifier.clickable {
-                    onOpenPrivacy()
-                })
-            Text("  ·  ", color = textMuted)
-            Text("Termos", color = textMuted,
-                modifier = Modifier.clickable {
-                    onOpenTerms()
-                })
+            Text("Ajuda", color = textMuted, modifier = Modifier.clickable { onOpenHelp() })
+            Text("  |  ", color = textMuted)
+            Text("Privacidade", color = textMuted, modifier = Modifier.clickable { onOpenPrivacy() })
+            Text("  |  ", color = textMuted)
+            Text("Termos", color = textMuted, modifier = Modifier.clickable { onOpenTerms() })
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -1448,14 +1437,14 @@ private fun HelpScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("X", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
         Text("Ajuda", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Guia rÃƒÆ’Ã‚Â¡pido de atendimento", color = textMuted, fontSize = 13.sp)
+        Text("Guia rapido de atendimento", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1465,27 +1454,27 @@ private fun HelpScreen(
         ) {
             PolicySection(
                 title = "1. Como iniciar um atendimento",
-                body = "Toque em SOLICITAR SUPORTE e aguarde a conexÃƒÆ’Ã‚Â£o com um tÃƒÆ’Ã‚Â©cnico. Quando o atendimento for aceito, a sessÃƒÆ’Ã‚Â£o serÃƒÆ’Ã‚Â¡ aberta automaticamente no aplicativo."
+                body = "Toque em SOLICITAR SUPORTE e aguarde a conexao com um tecnico. Quando o atendimento for aceito, a sessao sera aberta automaticamente no aplicativo."
             )
             PolicySection(
-                title = "2. PermissÃƒÆ’Ã‚Âµes durante o suporte",
-                body = "Alguns atendimentos podem exigir permissÃƒÆ’Ã‚Âµes temporÃƒÆ’Ã‚Â¡rias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissÃƒÆ’Ã‚Âµes sÃƒÆ’Ã‚Â£o opcionais e vocÃƒÆ’Ã‚Âª controla todas elas no app."
+                title = "2. Permissoes durante o suporte",
+                body = "Alguns atendimentos podem exigir permissoes temporarias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissoes sao opcionais e voce controla todas elas no app."
             )
             PolicySection(
-                title = "3. SeguranÃƒÆ’Ã‚Â§a da sessÃƒÆ’Ã‚Â£o",
-                body = "Nenhuma aÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o remota ÃƒÆ’Ã‚Â© iniciada sem sua autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o explÃƒÆ’Ã‚Â­cita. VocÃƒÆ’Ã‚Âª pode interromper o compartilhamento e revogar permissÃƒÆ’Ã‚Âµes a qualquer momento."
+                title = "3. Seguranca da sessao",
+                body = "Nenhuma acao remota e iniciada sem sua autorizacao explicita. Voce pode interromper o compartilhamento e revogar permissoes a qualquer momento."
             )
             PolicySection(
                 title = "4. Encerrar atendimento",
-                body = "Quando desejar, finalize o suporte pelo botÃƒÆ’Ã‚Â£o de encerramento na tela de sessÃƒÆ’Ã‚Â£o. VocÃƒÆ’Ã‚Âª tambÃƒÆ’Ã‚Â©m pode interromper permissÃƒÆ’Ã‚Âµes diretamente nas configuraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes do seu dispositivo."
+                body = "Quando desejar, finalize o suporte pelo botao de encerramento na tela de sessao. Voce tambem pode interromper permissoes diretamente nas configuracoes do seu dispositivo."
             )
             PolicySection(
                 title = "5. Problemas comuns",
-                body = "Se a conexÃƒÆ’Ã‚Â£o estiver instÃƒÆ’Ã‚Â¡vel, verifique internet, bateria e permissÃƒÆ’Ã‚Âµes do app. Em caso de falha de acesso remoto, confira se o serviÃƒÆ’Ã‚Â§o de acessibilidade do Suporte X estÃƒÆ’Ã‚Â¡ ativado."
+                body = "Se a conexao estiver instavel, verifique internet, bateria e permissoes do app. Em caso de falha de acesso remoto, confira se o servico de acessibilidade do Suporte X esta ativado."
             )
             PolicySection(
                 title = "6. Canais oficiais",
-                body = "Para suporte administrativo, dÃƒÆ’Ã‚Âºvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
+                body = "Para suporte administrativo, duvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
             )
         }
     }
@@ -1506,14 +1495,14 @@ private fun PrivacyPolicyScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("X", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text("PolÃƒÆ’Ã‚Â­tica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("Politica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("ÃƒÆ’Ã…Â¡ltima atualizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o: 11 de marÃƒÆ’Ã‚Â§o de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Ultima atualizacao: 11 de marco de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1522,42 +1511,42 @@ private fun PrivacyPolicyScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                "A Suporte X valoriza a privacidade e a seguranÃƒÆ’Ã‚Â§a dos dados dos usuÃƒÆ’Ã‚Â¡rios. Esta PolÃƒÆ’Ã‚Â­tica de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes durante a utilizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do aplicativo e dos serviÃƒÆ’Ã‚Â§os de suporte tÃƒÆ’Ã‚Â©cnico remoto.",
+                "A Suporte X valoriza a privacidade e a seguranca dos dados dos usuarios. Esta Politica de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informacoes durante a utilizacao do aplicativo e dos servicos de suporte tecnico remoto.",
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
             Spacer(Modifier.height(14.dp))
             PolicySection(
                 title = "1. Dados que coletamos",
-                body = "Para a prestaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o adequada do serviÃƒÆ’Ã‚Â§o de suporte tÃƒÆ’Ã‚Â©cnico remoto, podemos coletar as seguintes informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Nome informado pelo usuÃƒÆ’Ã‚Â¡rio no aplicativo\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Identificadores de sessÃƒÆ’Ã‚Â£o e atendimento\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ InformaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes tÃƒÆ’Ã‚Â©cnicas do dispositivo utilizado\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Mensagens trocadas no chat de atendimento\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Arquivos enviados durante o suporte tÃƒÆ’Ã‚Â©cnico\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Registros tÃƒÆ’Ã‚Â©cnicos necessÃƒÆ’Ã‚Â¡rios para diagnÃƒÆ’Ã‚Â³stico e resoluÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de problemas\n\nEssas informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes sÃƒÆ’Ã‚Â£o coletadas exclusivamente para viabilizar o funcionamento do serviÃƒÆ’Ã‚Â§o de suporte."
+                body = "Para a prestacao adequada do servico de suporte tecnico remoto, podemos coletar as seguintes informacoes:\n\n- Nome informado pelo usuario no aplicativo\n- Identificadores de sessao e atendimento\n- Informacoes tecnicas do dispositivo utilizado\n- Mensagens trocadas no chat de atendimento\n- Arquivos enviados durante o suporte tecnico\n- Registros tecnicos necessarios para diagnostico e resolucao de problemas\n\nEssas informacoes sao coletadas exclusivamente para viabilizar o funcionamento do servico de suporte."
             )
             PolicySection(
                 title = "2. Finalidade do uso dos dados",
-                body = "Os dados coletados sÃƒÆ’Ã‚Â£o utilizados para:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Identificar o usuÃƒÆ’Ã‚Â¡rio durante o atendimento\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Realizar suporte tÃƒÆ’Ã‚Â©cnico remoto\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Registrar o histÃƒÆ’Ã‚Â³rico de sessÃƒÆ’Ã‚Âµes de atendimento\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Diagnosticar e solucionar problemas tÃƒÆ’Ã‚Â©cnicos\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Melhorar a qualidade e eficiÃƒÆ’Ã‚Âªncia do serviÃƒÆ’Ã‚Â§o\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Garantir a seguranÃƒÆ’Ã‚Â§a e integridade da plataforma"
+                body = "Os dados coletados sao utilizados para:\n\n- Identificar o usuario durante o atendimento\n- Realizar suporte tecnico remoto\n- Registrar o historico de sessoes de atendimento\n- Diagnosticar e solucionar problemas tecnicos\n- Melhorar a qualidade e eficiencia do servico\n- Garantir a seguranca e integridade da plataforma"
             )
             PolicySection(
                 title = "3. Compartilhamento de dados",
-                body = "A Suporte X nÃƒÆ’Ã‚Â£o vende, aluga ou comercializa dados pessoais dos usuÃƒÆ’Ã‚Â¡rios.\n\nO compartilhamento de informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes pode ocorrer apenas quando necessÃƒÆ’Ã‚Â¡rio com:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Provedores de infraestrutura e hospedagem\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ ServiÃƒÆ’Ã‚Â§os de armazenamento de dados\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Ferramentas necessÃƒÆ’Ã‚Â¡rias para o funcionamento da plataforma\n\nTodos os parceiros seguem padrÃƒÆ’Ã‚Âµes de seguranÃƒÆ’Ã‚Â§a e proteÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de dados compatÃƒÆ’Ã‚Â­veis com a legislaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o aplicÃƒÆ’Ã‚Â¡vel."
+                body = "A Suporte X nao vende, aluga ou comercializa dados pessoais dos usuarios.\n\nO compartilhamento de informacoes pode ocorrer apenas quando necessario com:\n\n- Provedores de infraestrutura e hospedagem\n- Servicos de armazenamento de dados\n- Ferramentas necessarias para o funcionamento da plataforma\n\nTodos os parceiros seguem padroes de seguranca e protecao de dados compativeis com a legislacao aplicavel."
             )
             PolicySection(
-                title = "4. PermissÃƒÆ’Ã‚Âµes e controle do usuÃƒÆ’Ã‚Â¡rio",
-                body = "Alguns recursos do aplicativo podem solicitar permissÃƒÆ’Ã‚Âµes especÃƒÆ’Ã‚Â­ficas do dispositivo, como:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Compartilhamento de tela\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Acesso remoto ao dispositivo\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Envio de arquivos ou imagens\n\nEssas permissÃƒÆ’Ã‚Âµes sÃƒÆ’Ã‚Â£o sempre solicitadas com autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o explÃƒÆ’Ã‚Â­cita do usuÃƒÆ’Ã‚Â¡rio e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
+                title = "4. Permissoes e controle do usuario",
+                body = "Alguns recursos do aplicativo podem solicitar permissoes especificas do dispositivo, como:\n\n- Compartilhamento de tela\n- Acesso remoto ao dispositivo\n- Envio de arquivos ou imagens\n\nEssas permissoes sao sempre solicitadas com autorizacao explicita do usuario e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
             )
             PolicySection(
-                title = "5. Armazenamento e retenÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de dados",
-                body = "Os dados coletados sÃƒÆ’Ã‚Â£o armazenados apenas pelo perÃƒÆ’Ã‚Â­odo necessÃƒÆ’Ã‚Â¡rio para:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ PrestaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o do suporte tÃƒÆ’Ã‚Â©cnico\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Cumprimento de obrigaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes legais\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Garantia da seguranÃƒÆ’Ã‚Â§a operacional do serviÃƒÆ’Ã‚Â§o\n\nApÃƒÆ’Ã‚Â³s esse perÃƒÆ’Ã‚Â­odo, os dados podem ser excluÃƒÆ’Ã‚Â­dos ou anonimizados."
+                title = "5. Armazenamento e retencao de dados",
+                body = "Os dados coletados sao armazenados apenas pelo periodo necessario para:\n\n- Prestacao do suporte tecnico\n- Cumprimento de obrigacoes legais\n- Garantia da seguranca operacional do servico\n\nApos esse periodo, os dados podem ser excluidos ou anonimizados."
             )
             PolicySection(
-                title = "6. Direitos do usuÃƒÆ’Ã‚Â¡rio",
-                body = "Em conformidade com a Lei Geral de ProteÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de Dados (LGPD ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ Lei nÃƒâ€šÃ‚Âº 13.709/2018), o usuÃƒÆ’Ã‚Â¡rio possui o direito de:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Solicitar acesso aos seus dados\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Corrigir dados incompletos ou desatualizados\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Solicitar exclusÃƒÆ’Ã‚Â£o de dados quando aplicÃƒÆ’Ã‚Â¡vel\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Solicitar informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes sobre o tratamento de dados\n\nAs solicitaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes podem ser feitas pelos canais de contato oficiais."
+                title = "6. Direitos do usuario",
+                body = "Em conformidade com a Lei Geral de Protecao de Dados (LGPD - Lei no 13.709/2018), o usuario possui o direito de:\n\n- Solicitar acesso aos seus dados\n- Corrigir dados incompletos ou desatualizados\n- Solicitar exclusao de dados quando aplicavel\n- Solicitar informacoes sobre o tratamento de dados\n\nAs solicitacoes podem ser feitas pelos canais de contato oficiais."
             )
             PolicySection(
-                title = "7. SeguranÃƒÆ’Ã‚Â§a das informaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes",
-                body = "A Suporte X adota medidas tÃƒÆ’Ã‚Â©cnicas e organizacionais para proteger os dados contra acesso nÃƒÆ’Ã‚Â£o autorizado, alteraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o, divulgaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o ou destruiÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o indevida.\n\nEntre as medidas aplicadas estÃƒÆ’Ã‚Â£o:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Controle de acesso aos dados\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ AutenticaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o segura\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Registros de auditoria\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ ProteÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o da infraestrutura da plataforma"
+                title = "7. Seguranca das informacoes",
+                body = "A Suporte X adota medidas tecnicas e organizacionais para proteger os dados contra acesso nao autorizado, alteracao, divulgacao ou destruicao indevida.\n\nEntre as medidas aplicadas estao:\n\n- Controle de acesso aos dados\n- Autenticacao segura\n- Registros de auditoria\n- Protecao da infraestrutura da plataforma"
             )
             PolicySection(
                 title = "8. Contato",
-                body = "Para dÃƒÆ’Ã‚Âºvidas, solicitaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes ou questÃƒÆ’Ã‚Âµes relacionadas ÃƒÆ’Ã‚Â  privacidade e proteÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+                body = "Para duvidas, solicitacoes ou questoes relacionadas a privacidade e protecao de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
             )
         }
     }
@@ -1578,7 +1567,7 @@ private fun TermsOfUseScreen(
             horizontalArrangement = Arrangement.End
         ) {
             TextButton(onClick = onClose) {
-                Text("ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¢", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Text("X", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -1587,7 +1576,7 @@ private fun TermsOfUseScreen(
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
         Text("Operado por Xavier Assessoria Digital", color = textMuted, fontSize = 13.sp)
         Text("CNPJ: 45.765.097/0001-61", color = textMuted, fontSize = 13.sp)
-        Text("ÃƒÆ’Ã…Â¡ltima atualizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o: 11 de marÃƒÆ’Ã‚Â§o de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Ultima atualizacao: 11 de marco de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1596,36 +1585,36 @@ private fun TermsOfUseScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             PolicySection(
-                title = "1. Sobre o serviÃƒÆ’Ã‚Â§o",
-                body = "O Suporte X ÃƒÆ’Ã‚Â© uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de suporte tÃƒÆ’Ã‚Â©cnico remoto entre tÃƒÆ’Ã‚Â©cnicos e usuÃƒÆ’Ã‚Â¡rios, por meio de comunicaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o em tempo real, compartilhamento de tela e ferramentas de assistÃƒÆ’Ã‚Âªncia remota.\n\nO serviÃƒÆ’Ã‚Â§o tem como objetivo facilitar o diagnÃƒÆ’Ã‚Â³stico e a resoluÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de problemas tÃƒÆ’Ã‚Â©cnicos diretamente no dispositivo do usuÃƒÆ’Ã‚Â¡rio, mediante autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o expressa do mesmo."
+                title = "1. Sobre o servico",
+                body = "O Suporte X e uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realizacao de suporte tecnico remoto entre tecnicos e usuarios, por meio de comunicacao em tempo real, compartilhamento de tela e ferramentas de assistencia remota.\n\nO servico tem como objetivo facilitar o diagnostico e a resolucao de problemas tecnicos diretamente no dispositivo do usuario, mediante autorizacao expressa do mesmo."
             )
             PolicySection(
-                title = "2. AceitaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o dos termos",
-                body = "Ao utilizar o aplicativo Suporte X, o usuÃƒÆ’Ã‚Â¡rio declara que:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ leu e compreendeu estes Termos de Uso\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ concorda com as condiÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes aqui estabelecidas\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ autoriza o funcionamento das funcionalidades necessÃƒÆ’Ã‚Â¡rias para o suporte tÃƒÆ’Ã‚Â©cnico remoto\n\nCaso o usuÃƒÆ’Ã‚Â¡rio nÃƒÆ’Ã‚Â£o concorde com estes termos, nÃƒÆ’Ã‚Â£o deverÃƒÆ’Ã‚Â¡ utilizar o aplicativo."
+                title = "2. Aceitacao dos termos",
+                body = "Ao utilizar o aplicativo Suporte X, o usuario declara que:\n\n- leu e compreendeu estes Termos de Uso\n- concorda com as condicoes aqui estabelecidas\n- autoriza o funcionamento das funcionalidades necessarias para o suporte tecnico remoto\n\nCaso o usuario nao concorde com estes termos, nao devera utilizar o aplicativo."
             )
             PolicySection(
                 title = "3. Funcionamento do suporte remoto",
-                body = "Durante uma sessÃƒÆ’Ã‚Â£o de suporte, o usuÃƒÆ’Ã‚Â¡rio poderÃƒÆ’Ã‚Â¡ autorizar funcionalidades como:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ compartilhamento de tela\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ envio de arquivos\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ comunicaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o por chat ou ÃƒÆ’Ã‚Â¡udio\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ controle remoto assistido do dispositivo\n\nEssas funcionalidades sÃƒÆ’Ã‚Â³ sÃƒÆ’Ã‚Â£o ativadas com autorizaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o explÃƒÆ’Ã‚Â­cita do usuÃƒÆ’Ã‚Â¡rio e podem ser interrompidas a qualquer momento pelo prÃƒÆ’Ã‚Â³prio aplicativo."
+                body = "Durante uma sessao de suporte, o usuario podera autorizar funcionalidades como:\n\n- compartilhamento de tela\n- envio de arquivos\n- comunicacao por chat ou audio\n- controle remoto assistido do dispositivo\n\nEssas funcionalidades so sao ativadas com autorizacao explicita do usuario e podem ser interrompidas a qualquer momento pelo proprio aplicativo."
             )
             PolicySection(
-                title = "4. Responsabilidades do usuÃƒÆ’Ã‚Â¡rio",
-                body = "O usuÃƒÆ’Ã‚Â¡rio ÃƒÆ’Ã‚Â© responsÃƒÆ’Ã‚Â¡vel por:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ conceder permissÃƒÆ’Ã‚Âµes apenas quando desejar iniciar um atendimento\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ encerrar a sessÃƒÆ’Ã‚Â£o de suporte quando considerar necessÃƒÆ’Ã‚Â¡rio\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ nÃƒÆ’Ã‚Â£o utilizar o aplicativo para atividades ilegais ou abusivas"
+                title = "4. Responsabilidades do usuario",
+                body = "O usuario e responsavel por:\n\n- conceder permissoes apenas quando desejar iniciar um atendimento\n- encerrar a sessao de suporte quando considerar necessario\n- nao utilizar o aplicativo para atividades ilegais ou abusivas"
             )
             PolicySection(
-                title = "5. LimitaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de responsabilidade",
-                body = "A Xavier Assessoria Digital nÃƒÆ’Ã‚Â£o se responsabiliza por:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ falhas causadas por terceiros\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ problemas decorrentes de uso indevido do dispositivo\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ indisponibilidade temporÃƒÆ’Ã‚Â¡ria de serviÃƒÆ’Ã‚Â§os externos"
+                title = "5. Limitacao de responsabilidade",
+                body = "A Xavier Assessoria Digital nao se responsabiliza por:\n\n- falhas causadas por terceiros\n- problemas decorrentes de uso indevido do dispositivo\n- indisponibilidade temporaria de servicos externos"
             )
             PolicySection(
-                title = "6. ModificaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Âµes do serviÃƒÆ’Ã‚Â§o",
-                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de seguranÃƒÆ’Ã‚Â§a, desempenho ou conformidade legal."
+                title = "6. Modificacoes do servico",
+                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de seguranca, desempenho ou conformidade legal."
             )
             PolicySection(
-                title = "7. LegislaÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o aplicÃƒÆ’Ã‚Â¡vel",
-                body = "Este serviÃƒÆ’Ã‚Â§o ÃƒÆ’Ã‚Â© regido pelas leis da RepÃƒÆ’Ã‚Âºblica Federativa do Brasil, especialmente pela:\n\nÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ Lei Geral de ProteÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o de Dados (LGPD ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ Lei nÃƒâ€šÃ‚Âº 13.709/2018)"
+                title = "7. Legislacao aplicavel",
+                body = "Este servico e regido pelas leis da Republica Federativa do Brasil, especialmente pela:\n\n- Lei Geral de Protecao de Dados (LGPD - Lei no 13.709/2018)"
             )
             PolicySection(
                 title = "8. Contato",
-                body = "Empresa responsÃƒÆ’Ã‚Â¡vel:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereÃƒÆ’Ã‚Â§o:\nRua dos JequitibÃƒÆ’Ã‚Â¡s, 1895w\nResidencial ParaÃƒÆ’Ã‚Â­so\nNova Mutum ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“ MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
+                body = "Empresa responsavel:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereco:\nRua dos Jequitibas, 1895w\nResidencial Paraiso\nNova Mutum - MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
     }
@@ -1655,14 +1644,13 @@ private fun WaitingScreen(
         Spacer(Modifier.height(80.dp))
         CircularProgressIndicator()
         Spacer(Modifier.height(16.dp))
-        Text("Acionando tÃƒÆ’Ã‚Â©cnico, aguardeÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦", fontSize = 18.sp)
-        Text("Tempo mÃƒÆ’Ã‚Â©dio: ~2ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“5 min", color = textMuted)
+        Text("Acionando tecnico, aguarde...", fontSize = 18.sp)
+        Text("Tempo medio: ~2-5 min", color = textMuted)
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = onCancel,
             modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) { Text("CANCELAR SOLICITAÃƒÆ’Ã¢â‚¬Â¡ÃƒÆ’Ã†â€™O", color = Color.White) }
+        ) { Text("CANCELAR SOLICITACAO", color = Color.White) }
     }
 }
-
