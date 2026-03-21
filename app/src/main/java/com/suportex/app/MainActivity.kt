@@ -12,6 +12,7 @@ import android.app.ActivityManager
 import android.os.Build
 import android.os.Bundle
 import android.os.BatteryManager
+import android.os.StatFs
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -58,6 +59,7 @@ import com.suportex.app.call.CallUiUpdate
 import com.suportex.app.call.VoiceCallManager
 import com.suportex.app.remote.AccessibilityUtils
 import com.suportex.app.remote.RemoteCommandBus
+import com.suportex.app.remote.RemoteControlService
 import com.suportex.app.ui.screens.CardPlaceholderScreen
 import com.suportex.app.ui.screens.PixPlaceholderScreen
 import com.suportex.app.ui.screens.PurchaseCreditsScreen
@@ -172,9 +174,32 @@ class MainActivity : ComponentActivity() {
         callConnected = callConnectedActive
     )
 
-    private fun buildTelemetrySnapshot(battery: Int?, net: String?): SessionTelemetry = SessionTelemetry(
-        battery = battery,
-        net = net,
+    private data class RuntimeTelemetrySnapshot(
+        val batteryLevel: Int?,
+        val batteryCharging: Boolean,
+        val temperatureC: Double?,
+        val networkLabel: String,
+        val storageFreeBytes: Long?,
+        val storageTotalBytes: Long?,
+        val permissionsSummary: String,
+        val permissionsMap: Map<String, Any>,
+        val health: String,
+        val alerts: String
+    )
+
+    private fun buildTelemetrySnapshot(snapshot: RuntimeTelemetrySnapshot): SessionTelemetry = SessionTelemetry(
+        battery = snapshot.batteryLevel,
+        net = snapshot.networkLabel,
+        network = snapshot.networkLabel,
+        batteryLevel = snapshot.batteryLevel,
+        batteryCharging = snapshot.batteryCharging,
+        temperatureC = snapshot.temperatureC,
+        storageFreeBytes = snapshot.storageFreeBytes,
+        storageTotalBytes = snapshot.storageTotalBytes,
+        health = snapshot.health,
+        permissionsSummary = snapshot.permissionsSummary,
+        permissions = snapshot.permissionsMap,
+        alerts = snapshot.alerts,
         sharing = isSharingActive,
         remoteEnabled = remoteEnabledActive,
         calling = callingActive,
@@ -342,14 +367,26 @@ class MainActivity : ComponentActivity() {
         val sid = currentSessionId ?: return
         if (!this::socket.isInitialized) return
 
-        val battery = getBatteryLevel()
-        val network = getNetworkType()
+        val telemetry = collectRuntimeTelemetry()
+        val permissionsJson = JSONObject().apply {
+            telemetry.permissionsMap.forEach { (key, value) -> put(key, value) }
+            put("summary", telemetry.permissionsSummary)
+        }
         val data = JSONObject().apply {
             put("sessionId", sid)
             put("from", "client")
             val status = JSONObject()
-            status.put("battery", battery ?: JSONObject.NULL)
-            status.put("net", network)
+            status.put("battery", telemetry.batteryLevel ?: JSONObject.NULL)
+            status.put("batteryLevel", telemetry.batteryLevel ?: JSONObject.NULL)
+            status.put("batteryCharging", telemetry.batteryCharging)
+            status.put("temperatureC", telemetry.temperatureC ?: JSONObject.NULL)
+            status.put("network", telemetry.networkLabel)
+            status.put("net", telemetry.networkLabel)
+            status.put("storageFreeBytes", telemetry.storageFreeBytes ?: JSONObject.NULL)
+            status.put("storageTotalBytes", telemetry.storageTotalBytes ?: JSONObject.NULL)
+            status.put("permissions", permissionsJson)
+            status.put("health", telemetry.health)
+            status.put("alerts", telemetry.alerts)
             status.put("sharing", isSharingActive)
             status.put("remoteEnabled", remoteEnabledActive)
             status.put("calling", callingActive)
@@ -361,15 +398,22 @@ class MainActivity : ComponentActivity() {
             type = "telemetry",
             origin = "client",
             extras = mapOf(
-                "battery" to battery,
-                "net" to network,
+                "battery" to telemetry.batteryLevel,
+                "batteryCharging" to telemetry.batteryCharging,
+                "temperatureC" to telemetry.temperatureC,
+                "network" to telemetry.networkLabel,
+                "storageFreeBytes" to telemetry.storageFreeBytes,
+                "storageTotalBytes" to telemetry.storageTotalBytes,
+                "permissions" to telemetry.permissionsSummary,
+                "health" to telemetry.health,
+                "alerts" to telemetry.alerts,
                 "sharing" to isSharingActive,
                 "remoteEnabled" to remoteEnabledActive,
                 "calling" to callingActive,
                 "callConnected" to callConnectedActive
             )
         )
-        pushSessionState(buildTelemetrySnapshot(battery, network))
+        pushSessionState(buildTelemetrySnapshot(telemetry))
     }
 
     private fun startTelemetryLoop() {
@@ -387,26 +431,153 @@ class MainActivity : ComponentActivity() {
         telemetryJob = null
     }
 
-    private fun getBatteryLevel(): Int? {
-        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            ?: return null
-        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-        if (level < 0 || scale <= 0) return null
-        return (level * 100) / scale
+    private fun collectRuntimeTelemetry(): RuntimeTelemetrySnapshot {
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val batteryLevel = if (level >= 0 && scale > 0) (level * 100) / scale else null
+        val batteryStatus = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val batteryCharging = batteryStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
+            batteryStatus == BatteryManager.BATTERY_STATUS_FULL
+        val temperatureRaw = batteryIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+            ?: Int.MIN_VALUE
+        val temperatureC = if (temperatureRaw != Int.MIN_VALUE) {
+            (temperatureRaw / 10.0)
+        } else {
+            null
+        }
+
+        val networkLabel = getNetworkLabel()
+        val (storageFreeBytes, storageTotalBytes) = getStorageSnapshot()
+
+        val accessibilityEnabled = AccessibilityUtils.isServiceEnabled(
+            this,
+            RemoteControlService::class.java
+        )
+        val microphoneGranted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val overlayEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+        val permissionsSummary = buildPermissionsSummary(
+            accessibilityEnabled = accessibilityEnabled,
+            microphoneGranted = microphoneGranted,
+            overlayEnabled = overlayEnabled
+        )
+        val health = buildDeviceHealthLabel(
+            batteryLevel = batteryLevel,
+            temperatureC = temperatureC,
+            storageFreeBytes = storageFreeBytes,
+            storageTotalBytes = storageTotalBytes
+        )
+        val alerts = buildDeviceAlertsLabel(
+            batteryLevel = batteryLevel,
+            temperatureC = temperatureC,
+            storageFreeBytes = storageFreeBytes,
+            storageTotalBytes = storageTotalBytes
+        )
+
+        return RuntimeTelemetrySnapshot(
+            batteryLevel = batteryLevel,
+            batteryCharging = batteryCharging,
+            temperatureC = temperatureC?.let { kotlin.math.round(it * 10.0) / 10.0 },
+            networkLabel = networkLabel,
+            storageFreeBytes = storageFreeBytes,
+            storageTotalBytes = storageTotalBytes,
+            permissionsSummary = permissionsSummary,
+            permissionsMap = mapOf(
+                "accessibilityEnabled" to accessibilityEnabled,
+                "microphoneGranted" to microphoneGranted,
+                "overlayEnabled" to overlayEnabled
+            ),
+            health = health,
+            alerts = alerts
+        )
     }
 
-    private fun getNetworkType(): String {
-        val cm = getSystemService(ConnectivityManager::class.java) ?: return "unknown"
-        val network = cm.activeNetwork ?: return "offline"
-        val caps = cm.getNetworkCapabilities(network) ?: return "unknown"
-        return when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cell"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "bluetooth"
-            else -> "unknown"
+    private fun getStorageSnapshot(): Pair<Long?, Long?> {
+        return runCatching {
+            val stat = StatFs(filesDir.absolutePath)
+            Pair(stat.availableBytes, stat.totalBytes)
+        }.getOrElse {
+            Pair(null, null)
         }
+    }
+
+    private fun getNetworkLabel(): String {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return "Desconhecida"
+        val network = cm.activeNetwork ?: return "Offline"
+        val caps = cm.getNetworkCapabilities(network) ?: return "Desconhecida"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Rede móvel"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "Bluetooth"
+            else -> "Desconhecida"
+        }
+    }
+
+    private fun buildPermissionsSummary(
+        accessibilityEnabled: Boolean,
+        microphoneGranted: Boolean,
+        overlayEnabled: Boolean
+    ): String {
+        val rows = listOf(
+            "Acessibilidade: ${if (accessibilityEnabled) "ok" else "pendente"}",
+            "Microfone: ${if (microphoneGranted) "ok" else "pendente"}",
+            "Sobreposição: ${if (overlayEnabled) "ok" else "pendente"}"
+        )
+        return rows.joinToString(" • ")
+    }
+
+    private fun buildDeviceHealthLabel(
+        batteryLevel: Int?,
+        temperatureC: Double?,
+        storageFreeBytes: Long?,
+        storageTotalBytes: Long?
+    ): String {
+        val storageRatio = if (storageFreeBytes != null && storageTotalBytes != null && storageTotalBytes > 0) {
+            storageFreeBytes.toDouble() / storageTotalBytes.toDouble()
+        } else {
+            null
+        }
+        if ((batteryLevel != null && batteryLevel <= 10) ||
+            (temperatureC != null && temperatureC >= 43.0) ||
+            (storageRatio != null && storageRatio <= 0.05)
+        ) {
+            return "Crítico"
+        }
+        if ((batteryLevel != null && batteryLevel <= 20) ||
+            (temperatureC != null && temperatureC >= 39.0) ||
+            (storageRatio != null && storageRatio <= 0.12)
+        ) {
+            return "Atenção"
+        }
+        return "Bom"
+    }
+
+    private fun buildDeviceAlertsLabel(
+        batteryLevel: Int?,
+        temperatureC: Double?,
+        storageFreeBytes: Long?,
+        storageTotalBytes: Long?
+    ): String {
+        val alerts = mutableListOf<String>()
+        if (batteryLevel != null && batteryLevel <= 15) {
+            alerts.add("Bateria baixa")
+        }
+        if (temperatureC != null && temperatureC >= 40.0) {
+            alerts.add("Temperatura elevada")
+        }
+        if (storageFreeBytes != null && storageTotalBytes != null && storageTotalBytes > 0) {
+            val ratio = storageFreeBytes.toDouble() / storageTotalBytes.toDouble()
+            if (ratio <= 0.1) alerts.add("Armazenamento quase cheio")
+        }
+        return if (alerts.isEmpty()) "Sem alertas" else alerts.joinToString(" • ")
     }
 
     private fun handleIncomingChat(obj: JSONObject) {

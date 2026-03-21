@@ -123,6 +123,16 @@ data class SessionState(
 data class SessionTelemetry(
     val battery: Int?,
     val net: String?,
+    val network: String? = null,
+    val batteryLevel: Int? = null,
+    val batteryCharging: Boolean? = null,
+    val temperatureC: Double? = null,
+    val storageFreeBytes: Long? = null,
+    val storageTotalBytes: Long? = null,
+    val health: String? = null,
+    val permissionsSummary: String? = null,
+    val permissions: Map<String, Any>? = null,
+    val alerts: String? = null,
     val sharing: Boolean,
     val remoteEnabled: Boolean,
     val calling: Boolean,
@@ -132,6 +142,16 @@ data class SessionTelemetry(
     fun toMap(): Map<String, Any> = buildMap {
         battery?.let { put("battery", it) }
         net?.let { put("net", it) }
+        network?.let { put("network", it) }
+        batteryLevel?.let { put("batteryLevel", it) }
+        batteryCharging?.let { put("batteryCharging", it) }
+        temperatureC?.let { put("temperatureC", it) }
+        storageFreeBytes?.let { put("storageFreeBytes", it) }
+        storageTotalBytes?.let { put("storageTotalBytes", it) }
+        health?.let { put("health", it) }
+        permissionsSummary?.let { put("permissionsSummary", it) }
+        permissions?.takeIf { it.isNotEmpty() }?.let { put("permissions", it) }
+        alerts?.let { put("alerts", it) }
         put("sharing", sharing)
         put("remoteEnabled", remoteEnabled)
         put("calling", calling)
