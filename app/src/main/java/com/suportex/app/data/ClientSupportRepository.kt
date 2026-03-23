@@ -104,16 +104,17 @@ class ClientSupportRepository(
         val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
         val client = resolvedClient?.client
         if (client == null) {
+            val ensuredClient = normalizedPhone?.let { ensureClientByPhone(normalizedPhone = it, displayName = null).client }
             return SupportAccessDecision.Allowed(
                 startContext = SupportStartContext(
-                    clientId = null,
+                    clientId = ensuredClient?.id,
                     phone = normalizedPhone,
                     isNewClient = true,
                     isFreeFirstSupport = true,
                     creditsToConsume = 0
                 ),
                 financialStatus = ClientFinancialStatus.UNREGISTERED_NEW_CLIENT,
-                client = null
+                client = ensuredClient
             )
         }
         val freePending = !client.freeFirstSupportUsed
@@ -174,7 +175,7 @@ class ClientSupportRepository(
             "status" to "queued",
             "isFreeFirstSupport" to startContext.isFreeFirstSupport,
             "creditsConsumed" to startContext.creditsToConsume,
-            "requiresTechnicianRegistration" to (startContext.clientId == null),
+            "requiresTechnicianRegistration" to (startContext.isNewClient || startContext.clientId == null),
             "problemSummary" to null,
             "solutionSummary" to null,
             "internalNotes" to null,
@@ -280,6 +281,7 @@ class ClientSupportRepository(
                 "name" to name,
                 "primaryEmail" to primaryEmail,
                 "notes" to notes,
+                "profileCompleted" to true,
                 "updatedAt" to now
             ),
             SetOptions.merge()
@@ -506,6 +508,7 @@ class ClientSupportRepository(
             val credits = (snap.getLong("credits") ?: 0L).toInt().coerceAtLeast(0)
             val supportsUsed = (snap.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
             val freeUsed = snap.getBoolean("freeFirstSupportUsed") ?: false
+            val profileCompleted = snap.getBoolean("profileCompleted") ?: false
             val createdAt = snap.getLong("createdAt") ?: now
             val existingName = snap.getString("name")
             val name = displayName?.takeIf { it.isNotBlank() } ?: existingName
@@ -523,6 +526,7 @@ class ClientSupportRepository(
                     "credits" to credits,
                     "supportsUsed" to supportsUsed,
                     "freeFirstSupportUsed" to freeUsed,
+                    "profileCompleted" to profileCompleted,
                     "status" to status,
                     "createdAt" to createdAt,
                     "updatedAt" to now

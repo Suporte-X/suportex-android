@@ -13,20 +13,17 @@ class AuthRepository {
     suspend fun ensureAnonAuth(): String {
         val currentUid = auth.currentUser?.uid
         if (!currentUid.isNullOrBlank()) {
+            if (currentUid != lastLoggedUid) {
+                Log.i(TAG, "Sessao autenticada (provider=${auth.currentUser?.providerId ?: "desconhecido"})")
+                lastLoggedUid = currentUid
+            }
             return currentUid
         }
-        val result = auth.signInAnonymously().await()
-        val uid = result.user?.uid ?: auth.currentUser?.uid
-        if (!uid.isNullOrBlank() && uid != lastLoggedUid) {
-            Log.i(TAG, "Sessao anonima autenticada")
-            lastLoggedUid = uid
-        }
-        return uid ?: ""
+        throw IllegalStateException("phone_auth_required")
     }
 
     suspend fun ensureAnonIdToken(forceRefresh: Boolean = false): String {
-        val uid = ensureAnonAuth()
-        if (uid.isBlank()) return ""
+        runCatching { ensureAnonAuth() }.getOrNull() ?: return ""
         val user = auth.currentUser ?: return ""
         return user.getIdToken(forceRefresh).await().token ?: ""
     }

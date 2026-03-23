@@ -65,6 +65,11 @@ import com.suportex.app.ui.screens.PixPlaceholderScreen
 import com.suportex.app.ui.screens.PurchaseCreditsScreen
 import com.suportex.app.ui.screens.SessionScreen
 import com.suportex.app.ui.screens.SupportHomeScreen
+import com.google.firebase.FirebaseException
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.PhoneAuthCredential
+import com.google.firebase.auth.PhoneAuthOptions
+import com.google.firebase.auth.PhoneAuthProvider
 import io.socket.client.IO
 import io.socket.client.Socket
 import okhttp3.*
@@ -81,6 +86,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION, PURCHASE_CREDITS, PAYMENT_CARD, PAYMENT_PIX }
 
@@ -136,6 +142,11 @@ class MainActivity : ComponentActivity() {
     private var audioTempFile: File? = null
     private var pendingSupportStartContext: SupportStartContext? = null
     private var pendingSupportSessionId: String? = null
+    private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
+    private var pendingSupportAfterPhoneAuth: (() -> Unit)? = null
+    private var phoneVerificationId: String? = null
+    private var phoneResendToken: PhoneAuthProvider.ForceResendingToken? = null
+    private var lastPhoneVerificationNumber: String? = null
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -152,6 +163,198 @@ class MainActivity : ComponentActivity() {
         val cb = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cb.setPrimaryClip(ClipData.newPlainText(label, text))
         Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun normalizePhoneForVerification(raw: String?): String? {
+        val cleaned = raw
+            ?.trim()
+            ?.filter { it.isDigit() || it == '+' }
+            ?.replace(" ", "")
+            .orEmpty()
+        if (cleaned.isBlank()) return null
+
+        val digits = cleaned.filter(Char::isDigit)
+        if (digits.length < 10) return null
+
+        if (cleaned.startsWith("+")) {
+            return "+$digits"
+        }
+
+        val withCountryCode = if (digits.length in 10..11) "55$digits" else digits
+        return "+$withCountryCode"
+    }
+
+    private fun completePendingSupportAfterPhoneAuth() {
+        val action = pendingSupportAfterPhoneAuth
+        pendingSupportAfterPhoneAuth = null
+        action?.invoke()
+    }
+
+    private fun ensurePhoneAuthBeforeSupport(onReady: () -> Unit) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val verifiedPhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
+            if (!verifiedPhone.isNullOrBlank()) {
+                runOnUiThread { onReady() }
+                return@launch
+            }
+
+            runOnUiThread {
+                pendingSupportAfterPhoneAuth = onReady
+                showPhoneAuthNumberDialog()
+            }
+        }
+    }
+
+    private fun showPhoneAuthNumberDialog() {
+        val wrapper = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, 0)
+        }
+        val hintText = android.widget.TextView(this).apply {
+            text = "Para solicitar suporte, confirme seu telefone com o Firebase."
+        }
+        val input = android.widget.EditText(this).apply {
+            hint = "+55..."
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+            setText(lastPhoneVerificationNumber ?: "")
+        }
+        wrapper.addView(hintText)
+        wrapper.addView(input)
+
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Verificacao por telefone")
+            .setView(wrapper)
+            .setNegativeButton("Cancelar") { d, _ ->
+                pendingSupportAfterPhoneAuth = null
+                d.dismiss()
+            }
+            .setPositiveButton("Continuar", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val normalized = normalizePhoneForVerification(input.text?.toString())
+                if (normalized.isNullOrBlank()) {
+                    input.error = "Informe um telefone valido com DDD."
+                    return@setOnClickListener
+                }
+                lastPhoneVerificationNumber = normalized
+                dialog.dismiss()
+                startPhoneVerification(normalized, forceResend = false)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun startPhoneVerification(phoneNumber: String, forceResend: Boolean) {
+        val callbacks = object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
+            override fun onVerificationCompleted(credential: PhoneAuthCredential) {
+                finalizePhoneSignIn(credential)
+            }
+
+            override fun onVerificationFailed(exception: FirebaseException) {
+                Log.e("SXS/Main", "Falha na verificacao de telefone", exception)
+                pendingSupportAfterPhoneAuth = null
+                setSystemMessageFromLauncher?.invoke(
+                    "Falha ao verificar telefone. Confira o numero e tente novamente."
+                )
+            }
+
+            override fun onCodeSent(
+                verificationId: String,
+                token: PhoneAuthProvider.ForceResendingToken
+            ) {
+                phoneVerificationId = verificationId
+                phoneResendToken = token
+                showPhoneAuthCodeDialog(phoneNumber)
+            }
+        }
+
+        val builder = PhoneAuthOptions.newBuilder(firebaseAuth)
+            .setPhoneNumber(phoneNumber)
+            .setTimeout(60L, TimeUnit.SECONDS)
+            .setActivity(this)
+            .setCallbacks(callbacks)
+
+        if (forceResend && phoneResendToken != null) {
+            builder.setForceResendingToken(phoneResendToken!!)
+        }
+
+        PhoneAuthProvider.verifyPhoneNumber(builder.build())
+        setSystemMessageFromLauncher?.invoke("Validando telefone...")
+    }
+
+    private fun showPhoneAuthCodeDialog(phoneNumber: String) {
+        val wrapper = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, 0)
+        }
+        val hintText = android.widget.TextView(this).apply {
+            text = "Digite o codigo enviado para $phoneNumber."
+        }
+        val codeInput = android.widget.EditText(this).apply {
+            hint = "Codigo de 6 digitos"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+        wrapper.addView(hintText)
+        wrapper.addView(codeInput)
+
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Confirmar codigo")
+            .setView(wrapper)
+            .setNegativeButton("Cancelar") { d, _ ->
+                pendingSupportAfterPhoneAuth = null
+                d.dismiss()
+            }
+            .setNeutralButton("Reenviar") { _, _ ->
+                startPhoneVerification(phoneNumber, forceResend = true)
+            }
+            .setPositiveButton("Verificar", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val code = codeInput.text?.toString()?.trim().orEmpty()
+                if (code.length < 6) {
+                    codeInput.error = "Codigo invalido."
+                    return@setOnClickListener
+                }
+
+                val verificationId = phoneVerificationId
+                if (verificationId.isNullOrBlank()) {
+                    setSystemMessageFromLauncher?.invoke(
+                        "Sessao de verificacao expirada. Tente novamente."
+                    )
+                    pendingSupportAfterPhoneAuth = null
+                    dialog.dismiss()
+                    return@setOnClickListener
+                }
+
+                dialog.dismiss()
+                val credential = PhoneAuthProvider.getCredential(verificationId, code)
+                finalizePhoneSignIn(credential)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun finalizePhoneSignIn(credential: PhoneAuthCredential) {
+        firebaseAuth.signInWithCredential(credential)
+            .addOnCompleteListener(this) { task ->
+                if (task.isSuccessful) {
+                    setSystemMessageFromLauncher?.invoke("Telefone verificado com sucesso.")
+                    completePendingSupportAfterPhoneAuth()
+                    return@addOnCompleteListener
+                }
+
+                Log.e("SXS/Main", "Falha ao autenticar com credencial de telefone", task.exception)
+                pendingSupportAfterPhoneAuth = null
+                setSystemMessageFromLauncher?.invoke(
+                    "Nao foi possivel validar o codigo. Tente novamente."
+                )
+            }
     }
 
     private fun sendCommand(type: String, payload: JSONObject? = null) {
@@ -990,11 +1193,22 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
+            val verifiedPhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
             if (uid.isNullOrBlank()) {
                 Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
                 runOnUiThread {
                     setScreenFromSocket?.invoke(Screen.HOME)
                     setSystemMessageFromLauncher?.invoke("Falha de autenticacao. Tente novamente em alguns segundos.")
+                }
+                return@launch
+            }
+            if (verifiedPhone.isNullOrBlank()) {
+                Log.e("SXS/Main", "Falha ao validar telefone antes de support:request")
+                runOnUiThread {
+                    setScreenFromSocket?.invoke(Screen.HOME)
+                    setSystemMessageFromLauncher?.invoke(
+                        "Telefone nao verificado. Confirme seu numero para solicitar suporte."
+                    )
                 }
                 return@launch
             }
@@ -1012,7 +1226,7 @@ class MainActivity : ComponentActivity() {
 
             val payload = JSONObject().apply {
                 put("clientName", clientName ?: "Cliente em atendimento")
-                put("clientPhone", startContext.phone ?: "")
+                put("clientPhone", verifiedPhone)
                 put("clientId", startContext.clientId ?: "")
                 put("brand", Build.BRAND ?: "Android")
                 put("model", Build.MODEL ?: "")
@@ -1360,33 +1574,35 @@ class MainActivity : ComponentActivity() {
                                     return@SupportHomeScreen
                                 }
 
-                                evaluateSupportEntry { decision ->
-                                    when (decision) {
-                                        is SupportAccessDecision.Allowed -> {
-                                            current = Screen.WAITING
-                                            requestSupport(
-                                                startContext = decision.startContext,
-                                                clientName = decision.client?.name ?: "Cliente"
-                                            )
-                                            loadHomeSnapshot { snapshot ->
-                                                homeSnapshot = snapshot
-                                                selectedPackage = selectedPackage
-                                                    ?: snapshot.packages.firstOrNull()
+                                ensurePhoneAuthBeforeSupport {
+                                    evaluateSupportEntry { decision ->
+                                        when (decision) {
+                                            is SupportAccessDecision.Allowed -> {
+                                                current = Screen.WAITING
+                                                requestSupport(
+                                                    startContext = decision.startContext,
+                                                    clientName = decision.client?.name ?: "Cliente"
+                                                )
+                                                loadHomeSnapshot { snapshot ->
+                                                    homeSnapshot = snapshot
+                                                    selectedPackage = selectedPackage
+                                                        ?: snapshot.packages.firstOrNull()
+                                                }
                                             }
-                                        }
 
-                                        is SupportAccessDecision.BlockedNeedsCredit -> {
-                                            homeSnapshot = homeSnapshot.copy(
-                                                client = decision.client,
-                                                clientMeta = homeSnapshot.clientMeta,
-                                                packages = decision.packages
-                                            )
-                                            selectedPackage = decision.packages.firstOrNull()
-                                            Toast.makeText(
-                                                this@MainActivity,
-                                                "Sem credito disponivel",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
+                                            is SupportAccessDecision.BlockedNeedsCredit -> {
+                                                homeSnapshot = homeSnapshot.copy(
+                                                    client = decision.client,
+                                                    clientMeta = homeSnapshot.clientMeta,
+                                                    packages = decision.packages
+                                                )
+                                                selectedPackage = decision.packages.firstOrNull()
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "Sem credito disponivel",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
                                         }
                                     }
                                 }
