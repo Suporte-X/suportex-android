@@ -44,6 +44,7 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `source`: `android_app | android_pnv_sdk | tech_panel`
 - `createdAt`
 - `updatedAt`
+- `expiresAt` (Timestamp; sugerido para TTL de 15 dias)
 
 ## collections/client_profiles
 - `clientId`
@@ -78,6 +79,7 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `createdAt`
 - `updatedAt`
 - `billingAppliedAt`
+- `expiresAt` (Timestamp; sugerido para TTL de 30 dias em sessoes finalizadas)
 
 ## collections/support_reports
 - `id`
@@ -85,6 +87,7 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `clientId`
 - `techId`
 - `createdAt`
+- `expiresAt` (Timestamp; sugerido para TTL de 30 dias)
 - `summary`
 - `actionsTaken`
 - `solutionApplied`
@@ -111,3 +114,23 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `whatsappRequested`
 - `pixPlaceholder`
 - `cardPlaceholder`
+
+## Politica de retencao recomendada (TTL Firestore)
+- `pnv_requests`: 15 dias
+- `support_sessions`: 30 dias (somente para dados operacionais; nao usar para cadastro principal)
+- `support_reports`: 30 dias
+- `clients`, `client_profiles`, `client_verifications`, `client_app_links`, `credit_orders`, `credit_packages`: sem TTL automatico
+
+## Limpeza inicial (legado ja gravado)
+Script local para apagar somente dados operacionais antigos:
+
+1. Instalar dependencia:
+   - `npm install firebase-admin`
+2. Rodar simulacao (nao apaga):
+   - `node tools/firestore-retention-cleanup.mjs`
+3. Executar limpeza real:
+   - `node tools/firestore-retention-cleanup.mjs --execute`
+
+Opcional:
+- `--project-id <id>`
+- `--pnv-days 15 --support-session-days 30 --support-report-days 30`

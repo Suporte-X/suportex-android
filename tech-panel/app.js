@@ -14,6 +14,7 @@ import {
   query,
   runTransaction,
   setDoc,
+  Timestamp,
   updateDoc
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
@@ -27,6 +28,12 @@ const COLLECTIONS = {
   supportReports: "support_reports",
   creditOrders: "credit_orders",
   creditPackages: "credit_packages"
+};
+
+const RETENTION_DAYS = {
+  pnvRequests: 15,
+  supportSessions: 30,
+  supportReports: 30
 };
 
 const state = {
@@ -420,6 +427,7 @@ async function resolveClientUidByClientId(clientId) {
 
 async function requestManualVerification(client) {
   const now = Date.now();
+  const pnvRequestExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.pnvRequests);
   const clientUid = await resolveClientUidByClientId(client.id);
   await addDoc(collection(db, COLLECTIONS.pnvRequests), {
     clientUid,
@@ -430,7 +438,8 @@ async function requestManualVerification(client) {
     reason: "manual_requested_by_technician",
     source: "tech_panel",
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    expiresAt: pnvRequestExpiresAt
   });
   await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
     clientId: client.id,
@@ -445,6 +454,7 @@ async function requestManualVerification(client) {
 
 async function confirmManualVerification(client, verifiedPhone) {
   const now = Date.now();
+  const pnvRequestExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.pnvRequests);
   const clientUid = await resolveClientUidByClientId(client.id);
   await setDoc(doc(db, COLLECTIONS.clients, client.id), {
     phone: verifiedPhone,
@@ -468,12 +478,14 @@ async function confirmManualVerification(client, verifiedPhone) {
     reason: "manual_verified_by_technician",
     source: "tech_panel",
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    expiresAt: pnvRequestExpiresAt
   });
 }
 
 async function markVerificationMismatch(client, reason) {
   const now = Date.now();
+  const pnvRequestExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.pnvRequests);
   const clientUid = await resolveClientUidByClientId(client.id);
   await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
     clientId: client.id,
@@ -493,7 +505,8 @@ async function markVerificationMismatch(client, reason) {
     reason: reason || "phone_divergent_manual",
     source: "tech_panel",
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    expiresAt: pnvRequestExpiresAt
   });
 }
 
@@ -584,6 +597,7 @@ async function closeLatestOpenSession(clientId, payload) {
   }
 
   const now = Date.now();
+  const supportSessionExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.supportSessions);
   const sessionRef = doc(db, COLLECTIONS.supportSessions, latest.id);
   const clientRef = doc(db, COLLECTIONS.clients, clientId);
   const profileRef = doc(db, COLLECTIONS.clientProfiles, clientId);
@@ -638,20 +652,28 @@ async function closeLatestOpenSession(clientId, payload) {
       solutionSummary: payload.solutionSummary || session.solutionSummary || null,
       internalNotes: payload.internalNotes || session.internalNotes || null,
       billingAppliedAt: session.billingAppliedAt || now,
+      expiresAt: supportSessionExpiresAt,
       updatedAt: now
     }, { merge: true });
   });
 
+  const supportReportExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.supportReports);
   await addDoc(collection(db, COLLECTIONS.supportReports), {
     sessionId: latest.id,
     clientId,
     techId: null,
     createdAt: now,
+    expiresAt: supportReportExpiresAt,
     summary: payload.problemSummary || null,
     actionsTaken: payload.internalNotes || null,
     solutionApplied: payload.solutionSummary || null,
     followUpNeeded: false
   });
+}
+
+function expiresAtFromMillis(baseMillis, days) {
+  const safeDays = Number.isFinite(days) ? Math.max(0, days) : 0;
+  return Timestamp.fromMillis(baseMillis + safeDays * 24 * 60 * 60 * 1000);
 }
 
 function deriveClientStatus(client) {

@@ -1,6 +1,7 @@
 package com.suportex.app.data
 
 import com.google.android.gms.tasks.Task
+import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
@@ -16,6 +17,7 @@ import com.suportex.app.data.model.SupportAccessDecision
 import com.suportex.app.data.model.SupportSessionRecord
 import com.suportex.app.data.model.SupportStartContext
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.Date
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -253,10 +255,12 @@ class ClientSupportRepository(
     suspend fun cancelSupportRequest(localSupportSessionId: String?) {
         authRepository.ensureAnonAuth()
         val normalized = localSupportSessionId?.takeIf { it.isNotBlank() } ?: return
+        val now = System.currentTimeMillis()
         supportSessions.document(normalized).set(
             mapOf(
                 "status" to "cancelled",
-                "updatedAt" to System.currentTimeMillis()
+                "expiresAt" to ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_SESSIONS),
+                "updatedAt" to now
             ),
             SetOptions.merge()
         ).await()
@@ -275,6 +279,7 @@ class ClientSupportRepository(
         val sanitizedClientId = clientId?.trim()?.takeIf { it.isNotBlank() }
         val normalizedPhone = normalizePhone(fallbackPhone)
         val now = System.currentTimeMillis()
+        val pnvRequestExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_PNV_REQUESTS)
 
         val requestPayload = mutableMapOf<String, Any?>(
             "clientUid" to sanitizedUid,
@@ -285,6 +290,7 @@ class ClientSupportRepository(
             "reason" to reason,
             "createdAt" to now,
             "updatedAt" to now,
+            "expiresAt" to pnvRequestExpiresAt,
             "source" to "android_app"
         )
         pnvRequests.document().set(requestPayload.filterValues { it != null }).await()
@@ -330,6 +336,7 @@ class ClientSupportRepository(
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(verifiedPhone) ?: return null
         val now = System.currentTimeMillis()
+        val pnvRequestExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_PNV_REQUESTS)
         val ensured = ensureClientByPhone(normalizedPhone = normalizedPhone, displayName = null)
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
 
@@ -365,6 +372,7 @@ class ClientSupportRepository(
                 "processedAt" to now,
                 "createdAt" to now,
                 "updatedAt" to now,
+                "expiresAt" to pnvRequestExpiresAt,
                 "source" to "android_pnv_sdk"
             ).filterValues { it != null }
         ).await()
@@ -500,6 +508,7 @@ class ClientSupportRepository(
                 "solutionSummary" to solutionSummary,
                 "internalNotes" to internalNotes,
                 "updatedAt" to now,
+                "expiresAt" to ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_SESSIONS),
                 "billingAppliedAt" to if (alreadyApplied) sessionSnap.getLong("billingAppliedAt") else now
             )
 
@@ -610,6 +619,7 @@ class ClientSupportRepository(
         followUpNeeded: Boolean
     ) {
         val now = System.currentTimeMillis()
+        val supportReportExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_REPORTS)
         val reportRef = supportReports.document()
         reportRef.set(
             mapOf(
@@ -617,6 +627,7 @@ class ClientSupportRepository(
                 "clientId" to clientId,
                 "techId" to techId,
                 "createdAt" to now,
+                "expiresAt" to supportReportExpiresAt,
                 "summary" to summary,
                 "actionsTaken" to actionsTaken,
                 "solutionApplied" to solutionApplied,
@@ -626,10 +637,17 @@ class ClientSupportRepository(
         supportSessions.document(sessionId).set(
             mapOf(
                 "reportId" to reportRef.id,
+                "expiresAt" to ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_SESSIONS),
                 "updatedAt" to now
             ),
             SetOptions.merge()
         ).await()
+    }
+
+    private fun ttlTimestampFrom(baseMillis: Long, days: Long): Timestamp {
+        val safeDays = days.coerceAtLeast(0L)
+        val ttlMillis = baseMillis + (safeDays * MILLIS_PER_DAY)
+        return Timestamp(Date(ttlMillis))
     }
 
     private suspend fun applyManualCreditDelta(clientId: String, delta: Int): Boolean {
@@ -1099,6 +1117,11 @@ class ClientSupportRepository(
     )
 
     private companion object {
+        const val RETENTION_DAYS_PNV_REQUESTS = 15L
+        const val RETENTION_DAYS_SUPPORT_SESSIONS = 30L
+        const val RETENTION_DAYS_SUPPORT_REPORTS = 30L
+        const val MILLIS_PER_DAY = 86_400_000L
+
         const val VERIFICATION_STATUS_PENDING = "pending"
         const val VERIFICATION_STATUS_VERIFIED = "verified"
         const val VERIFICATION_STATUS_MISMATCH = "mismatch"

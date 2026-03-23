@@ -46,3 +46,9 @@
 - O app tenta PNV apos solicitar suporte e registra rastros em `pnv_requests`.
 - Status de verificacao do cliente fica em `client_verifications`.
 - Fallback manual deve ser acionado somente pelo tecnico quando necessario.
+
+## 8. Retencao de dados operacionais
+- `pnv_requests`: manter por 15 dias.
+- `support_sessions`: manter por 30 dias para trilha operacional recente.
+- `support_reports`: manter por 30 dias.
+- Cadastros centrais (`clients`, `client_profiles`, `client_verifications`, `client_app_links`) nao entram em limpeza automatica.
