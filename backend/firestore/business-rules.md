@@ -1,8 +1,9 @@
 # Regras de Negocio - Cliente/Credito/Atendimento
 
 ## 1. Identificacao
-- O cliente e identificado por telefone (`clients.phone`).
-- Nao ha senha nem login obrigatorio na entrada do app.
+- O app cria sessao anonima automaticamente (sem tela de login) para gerar `clientUid`.
+- O cliente pode iniciar como conta provisoria por UID (`clients.id = uid_<firebase_uid>`).
+- Quando houver telefone verificado por Firebase PNV, o vinculo passa a priorizar `clients.phone`.
 - O e-mail principal e opcional e preenchido manualmente pelo tecnico.
 
 ## 2. Acesso ao suporte
@@ -39,3 +40,9 @@
   - fallback legado por `socket.id` nao deve ser reaberto quando `clientUid` vinculado
   - regras de supervisor e claim seguem obrigatorias
   - janela de tolerancia de `DISCONNECTED` no Android permanece
+
+## 7. Verificacao de telefone (PNV)
+- O atendimento nao deve ser bloqueado por falha de verificacao automatica.
+- O app tenta PNV apos solicitar suporte e registra rastros em `pnv_requests`.
+- Status de verificacao do cliente fica em `client_verifications`.
+- Fallback manual deve ser acionado somente pelo tecnico quando necessario.

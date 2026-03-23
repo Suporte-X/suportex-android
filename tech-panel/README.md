@@ -4,7 +4,9 @@ Painel simples para:
 - visualizar novas solicitacoes (`support_sessions`);
 - cadastrar cliente rapidamente (`clients`);
 - consultar ficha completa;
+- acompanhar status de verificacao (`client_verifications` e `pnv_requests`);
 - ajustar creditos manualmente;
+- acionar fallback manual de verificacao quando necessario;
 - registrar encerramento de atendimento;
 - visualizar pedidos de credito (`credit_orders`).
 

@@ -102,19 +102,57 @@ class ClientSupportRepository(
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(fallbackVerifiedPhone)
         val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
-        val client = resolvedClient?.client
+        val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+        var client = resolvedClient?.client
+        var ensuredAsNewClient = false
+
         if (client == null) {
-            val ensuredClient = normalizedPhone?.let { ensureClientByPhone(normalizedPhone = it, displayName = null).client }
+            val ensured = when {
+                normalizedPhone != null -> ensureClientByPhone(
+                    normalizedPhone = normalizedPhone,
+                    displayName = null
+                )
+                sanitizedUid != null -> ensureClientByUid(
+                    clientUid = sanitizedUid,
+                    displayName = null
+                )
+                else -> null
+            }
+            client = ensured?.client
+            ensuredAsNewClient = ensured?.isNewClient == true
+            if (sanitizedUid != null && client != null) {
+                upsertClientAppLink(
+                    clientUid = sanitizedUid,
+                    clientId = client.id,
+                    phone = normalizedPhone ?: client.phone.takeIf { it.isNotBlank() }
+                )
+            }
+        }
+
+        if (client == null) {
             return SupportAccessDecision.Allowed(
                 startContext = SupportStartContext(
-                    clientId = ensuredClient?.id,
+                    clientId = null,
                     phone = normalizedPhone,
                     isNewClient = true,
                     isFreeFirstSupport = true,
                     creditsToConsume = 0
                 ),
                 financialStatus = ClientFinancialStatus.UNREGISTERED_NEW_CLIENT,
-                client = ensuredClient
+                client = null
+            )
+        }
+        if (ensuredAsNewClient) {
+            return SupportAccessDecision.Allowed(
+                startContext = SupportStartContext(
+                    clientId = client.id,
+                    phone = normalizedPhone ?: client.phone.takeIf { it.isNotBlank() },
+                    isNewClient = true,
+                    isFreeFirstSupport = true,
+                    creditsToConsume = 0
+                ),
+                financialStatus = ClientFinancialStatus.UNREGISTERED_NEW_CLIENT,
+                client = client
             )
         }
         val freePending = !client.freeFirstSupportUsed
@@ -222,6 +260,130 @@ class ClientSupportRepository(
             ),
             SetOptions.merge()
         ).await()
+    }
+
+    suspend fun registerPnvAttempt(
+        clientUid: String?,
+        clientId: String?,
+        fallbackPhone: String?,
+        status: String = PNV_REQUEST_STATUS_PENDING,
+        manualFallback: Boolean = false,
+        reason: String? = null
+    ) {
+        authRepository.ensureAnonAuth()
+        val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+        val sanitizedClientId = clientId?.trim()?.takeIf { it.isNotBlank() }
+        val normalizedPhone = normalizePhone(fallbackPhone)
+        val now = System.currentTimeMillis()
+
+        val requestPayload = mutableMapOf<String, Any?>(
+            "clientUid" to sanitizedUid,
+            "clientId" to sanitizedClientId,
+            "phone" to normalizedPhone,
+            "status" to status,
+            "manualFallback" to manualFallback,
+            "reason" to reason,
+            "createdAt" to now,
+            "updatedAt" to now,
+            "source" to "android_app"
+        )
+        pnvRequests.document().set(requestPayload.filterValues { it != null }).await()
+
+        if (sanitizedUid != null && sanitizedClientId != null) {
+            upsertClientAppLink(
+                clientUid = sanitizedUid,
+                clientId = sanitizedClientId,
+                phone = normalizedPhone
+            )
+        }
+
+        if (sanitizedClientId != null) {
+            val clientSnap = clients.document(sanitizedClientId).get().await()
+            val primaryPhone = normalizePhone(clientSnap.getString("phone"))
+                ?: normalizedPhone
+                ?: clientSnap.getString("phone")
+            val verificationStatus = when {
+                status == PNV_REQUEST_STATUS_MANUAL_PENDING || manualFallback -> VERIFICATION_STATUS_MANUAL_REQUIRED
+                else -> VERIFICATION_STATUS_PENDING
+            }
+            clientVerifications.document(sanitizedClientId).set(
+                mapOf(
+                    "clientId" to sanitizedClientId,
+                    "primaryPhone" to primaryPhone,
+                    "verifiedPhone" to null,
+                    "status" to verificationStatus,
+                    "mismatchReason" to reason,
+                    "lastVerificationAt" to now,
+                    "updatedAt" to now
+                ).filterValues { it != null },
+                SetOptions.merge()
+            ).await()
+        }
+    }
+
+    suspend fun registerPnvSuccess(
+        clientUid: String?,
+        verifiedPhone: String,
+        token: String?,
+        localSupportSessionId: String?
+    ): ClientRecord? {
+        authRepository.ensureAnonAuth()
+        val normalizedPhone = normalizePhone(verifiedPhone) ?: return null
+        val now = System.currentTimeMillis()
+        val ensured = ensureClientByPhone(normalizedPhone = normalizedPhone, displayName = null)
+        val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+
+        if (sanitizedUid != null) {
+            upsertClientAppLink(
+                clientUid = sanitizedUid,
+                clientId = ensured.client.id,
+                phone = normalizedPhone
+            )
+        }
+
+        clientVerifications.document(ensured.client.id).set(
+            mapOf(
+                "clientId" to ensured.client.id,
+                "primaryPhone" to normalizedPhone,
+                "verifiedPhone" to normalizedPhone,
+                "status" to VERIFICATION_STATUS_VERIFIED,
+                "mismatchReason" to null,
+                "lastVerificationAt" to now,
+                "updatedAt" to now
+            ),
+            SetOptions.merge()
+        ).await()
+
+        pnvRequests.document().set(
+            mapOf(
+                "clientUid" to sanitizedUid,
+                "clientId" to ensured.client.id,
+                "phone" to normalizedPhone,
+                "status" to PNV_REQUEST_STATUS_PROCESSED,
+                "manualFallback" to false,
+                "tokenPresent" to !token.isNullOrBlank(),
+                "processedAt" to now,
+                "createdAt" to now,
+                "updatedAt" to now,
+                "source" to "android_pnv_sdk"
+            ).filterValues { it != null }
+        ).await()
+
+        val sessionRef = resolveSupportSessionRef(
+            localSupportSessionId = localSupportSessionId,
+            realtimeSessionId = null
+        )
+        sessionRef?.set(
+            mapOf(
+                "clientId" to ensured.client.id,
+                "clientPhone" to normalizedPhone,
+                "requiresTechnicianRegistration" to false,
+                "updatedAt" to now
+            ),
+            SetOptions.merge()
+        )?.await()
+
+        return clients.document(ensured.client.id).get().await().toClientRecord()
     }
 
     suspend fun registerCreditOrderIntent(
@@ -499,6 +661,30 @@ class ClientSupportRepository(
         displayName: String?
     ): EnsureClientResult {
         val clientId = clientDocIdFromPhone(normalizedPhone)
+        return ensureClientRecord(
+            clientId = clientId,
+            normalizedPhone = normalizedPhone,
+            displayName = displayName
+        )
+    }
+
+    private suspend fun ensureClientByUid(
+        clientUid: String,
+        displayName: String?
+    ): EnsureClientResult {
+        val clientId = clientDocIdFromUid(clientUid)
+        return ensureClientRecord(
+            clientId = clientId,
+            normalizedPhone = null,
+            displayName = displayName
+        )
+    }
+
+    private suspend fun ensureClientRecord(
+        clientId: String,
+        normalizedPhone: String?,
+        displayName: String?
+    ): EnsureClientResult {
         val clientRef = clients.document(clientId)
         val profileRef = clientProfiles.document(clientId)
         val now = System.currentTimeMillis()
@@ -511,6 +697,8 @@ class ClientSupportRepository(
             val profileCompleted = snap.getBoolean("profileCompleted") ?: false
             val createdAt = snap.getLong("createdAt") ?: now
             val existingName = snap.getString("name")
+            val existingPhone = snap.getString("phone")
+            val phoneToPersist = normalizedPhone ?: existingPhone.orEmpty()
             val name = displayName?.takeIf { it.isNotBlank() } ?: existingName
             val primaryEmail = snap.getString("primaryEmail")
             val notes = snap.getString("notes")
@@ -519,7 +707,7 @@ class ClientSupportRepository(
             tx.set(
                 clientRef,
                 mapOf(
-                    "phone" to normalizedPhone,
+                    "phone" to phoneToPersist,
                     "name" to name,
                     "primaryEmail" to primaryEmail,
                     "notes" to notes,
@@ -555,7 +743,7 @@ class ClientSupportRepository(
             EnsureClientResult(
                 client = ClientRecord(
                     id = clientId,
-                    phone = normalizedPhone,
+                    phone = phoneToPersist,
                     name = name,
                     primaryEmail = primaryEmail,
                     notes = notes,
@@ -581,7 +769,10 @@ class ClientSupportRepository(
             val linkedClient = resolveLinkedClientByUid(sanitizedUid)
             if (linkedClient != null) return ResolvedClientResult(client = linkedClient)
 
-            val pendingRequest = fetchLatestPendingPnvRequest(sanitizedUid)
+            val pendingRequest = fetchLatestPendingPnvRequest(
+                clientUid = sanitizedUid,
+                clientId = null
+            )
             val requestedClientId = pendingRequest?.getString("clientId")
             if (!requestedClientId.isNullOrBlank()) {
                 val requestedClient = clients.document(requestedClientId).get().await().toClientRecord()
@@ -593,6 +784,19 @@ class ClientSupportRepository(
                     )
                     return ResolvedClientResult(client = requestedClient)
                 }
+            }
+
+            val provisionalClient = clients.document(clientDocIdFromUid(sanitizedUid))
+                .get()
+                .await()
+                .toClientRecord()
+            if (provisionalClient != null) {
+                upsertClientAppLink(
+                    clientUid = sanitizedUid,
+                    clientId = provisionalClient.id,
+                    phone = provisionalClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone
+                )
+                return ResolvedClientResult(client = provisionalClient)
             }
         }
 
@@ -663,9 +867,10 @@ class ClientSupportRepository(
             shouldWrite = true
         }
 
-        val pendingRequest = clientUid
-            ?.takeIf { it.isNotBlank() }
-            ?.let { fetchLatestPendingPnvRequest(it) }
+        val pendingRequest = fetchLatestPendingPnvRequest(
+            clientUid = clientUid,
+            clientId = client.id
+        )
         val pendingRequestClientId = pendingRequest?.getString("clientId")
         val requestTargetsCurrentClient = pendingRequest != null &&
             (pendingRequestClientId.isNullOrBlank() || pendingRequestClientId == client.id)
@@ -720,12 +925,27 @@ class ClientSupportRepository(
             )
     }
 
-    private suspend fun fetchLatestPendingPnvRequest(clientUid: String): DocumentSnapshot? {
-        val snapshot = pnvRequests
-            .whereEqualTo("clientUid", clientUid)
-            .get()
-            .await()
-        return snapshot.documents
+    private suspend fun fetchLatestPendingPnvRequest(
+        clientUid: String?,
+        clientId: String?
+    ): DocumentSnapshot? {
+        val docs = mutableListOf<DocumentSnapshot>()
+        clientUid?.trim()?.takeIf { it.isNotBlank() }?.let { uid ->
+            val byUid = pnvRequests
+                .whereEqualTo("clientUid", uid)
+                .get()
+                .await()
+            docs.addAll(byUid.documents)
+        }
+        clientId?.trim()?.takeIf { it.isNotBlank() }?.let { id ->
+            val byClient = pnvRequests
+                .whereEqualTo("clientId", id)
+                .get()
+                .await()
+            docs.addAll(byClient.documents)
+        }
+        return docs
+            .distinctBy { it.id }
             .filter { doc ->
                 val status = doc.getString("status") ?: PNV_REQUEST_STATUS_PENDING
                 status == PNV_REQUEST_STATUS_PENDING || status == PNV_REQUEST_STATUS_MANUAL_PENDING
@@ -755,6 +975,9 @@ class ClientSupportRepository(
 
     private fun clientDocIdFromPhone(phone: String): String =
         "phone_${phone.filter(Char::isDigit)}"
+
+    private fun clientDocIdFromUid(clientUid: String): String =
+        "uid_${clientUid.filter { it.isLetterOrDigit() }}"
 
     private fun deriveClientStatus(credits: Int, freeFirstSupportUsed: Boolean): String {
         return when {

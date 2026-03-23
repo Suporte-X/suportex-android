@@ -19,7 +19,16 @@ class AuthRepository {
             }
             return currentUid
         }
-        throw IllegalStateException("phone_auth_required")
+        val signedUser = auth.signInAnonymously().await().user
+        val signedUid = signedUser?.uid ?: auth.currentUser?.uid
+        if (!signedUid.isNullOrBlank()) {
+            if (signedUid != lastLoggedUid) {
+                Log.i(TAG, "Sessao anonima criada com sucesso")
+                lastLoggedUid = signedUid
+            }
+            return signedUid
+        }
+        throw IllegalStateException("anonymous_auth_failed")
     }
 
     suspend fun ensureAnonIdToken(forceRefresh: Boolean = false): String {

@@ -3,7 +3,7 @@
 Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, creditos e cobranca futura.
 
 ## collections/clients
-- `id` (document id): `phone_<somente_digitos>`
+- `id` (document id): `phone_<somente_digitos>` ou `uid_<firebase_uid>`
 - `phone`: telefone principal do cliente (base de identificacao)
 - `name`: nome do cliente
 - `primaryEmail` (opcional/manual)
@@ -12,6 +12,36 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `supportsUsed`: atendimentos utilizados
 - `freeFirstSupportUsed`: primeiro atendimento gratis ja usado
 - `status`: `first_support_pending | with_credit | without_credit`
+- `createdAt`
+- `updatedAt`
+
+## collections/client_app_links
+- `id` (document id): `clientUid`
+- `clientUid`: UID anonimo do app Android
+- `clientId`: referencia logica ao cliente (`clients/<id>`)
+- `phone`: telefone conhecido no vinculo (quando existir)
+- `createdAt`
+- `updatedAt`
+
+## collections/client_verifications
+- `id` (document id): `clientId`
+- `clientId`
+- `primaryPhone`
+- `verifiedPhone`
+- `status`: `pending | verified | mismatch | manual_required`
+- `mismatchReason` (opcional)
+- `lastVerificationAt`
+- `updatedAt`
+
+## collections/pnv_requests
+- `id`
+- `clientUid` (opcional)
+- `clientId` (opcional)
+- `phone` (opcional)
+- `status`: `pending | manual_pending | processed`
+- `manualFallback`: `true | false`
+- `reason` (opcional)
+- `source`: `android_app | android_pnv_sdk | tech_panel`
 - `createdAt`
 - `updatedAt`
 

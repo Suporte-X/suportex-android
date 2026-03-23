@@ -20,6 +20,9 @@ import {
 const COLLECTIONS = {
   clients: "clients",
   clientProfiles: "client_profiles",
+  clientAppLinks: "client_app_links",
+  clientVerifications: "client_verifications",
+  pnvRequests: "pnv_requests",
   supportSessions: "support_sessions",
   supportReports: "support_reports",
   creditOrders: "credit_orders",
@@ -134,12 +137,14 @@ async function loadQueue() {
     sessions.map(async (session) => {
       const clientId = session.clientId || null;
       if (!clientId) {
-        return { session, client: null };
+        return { session, client: null, verification: null };
       }
       const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, clientId));
+      const verificationSnap = await getDoc(doc(db, COLLECTIONS.clientVerifications, clientId));
       return {
         session,
-        client: clientSnap.exists() ? { id: clientSnap.id, ...clientSnap.data() } : null
+        client: clientSnap.exists() ? { id: clientSnap.id, ...clientSnap.data() } : null,
+        verification: verificationSnap.exists() ? verificationSnap.data() : null
       };
     })
   );
@@ -150,10 +155,11 @@ async function loadQueue() {
   }
 
   queueList.innerHTML = "";
-  rows.forEach(({ session, client }) => {
+  rows.forEach(({ session, client, verification }) => {
     const isNewClient = !client;
     const freePending = isNewClient ? true : client.freeFirstSupportUsed === false;
     const noCredit = !freePending && (client?.credits ?? 0) <= 0;
+    const verificationStatus = verification?.status || "pending";
 
     const card = document.createElement("article");
     card.className = `queue-item ${isNewClient ? "is-new" : ""} ${noCredit ? "no-credit" : ""}`;
@@ -165,6 +171,7 @@ async function loadQueue() {
         ${isNewClient ? '<span class="badge warn">Primeiro atendimento gratis</span>' : ""}
         ${noCredit ? '<span class="badge danger">Sem credito</span>' : ""}
         ${!isNewClient && !noCredit ? '<span class="badge ok">Com credito</span>' : ""}
+        <span class="badge ${verificationBadgeClass(verificationStatus)}">${verificationStatusLabel(verificationStatus)}</span>
       </div>
       <div class="profile-actions">
         <button type="button" data-open-client="${client?.id || ""}" data-phone="${session.clientPhone || ""}">
@@ -205,20 +212,28 @@ async function loadClientProfile(clientId) {
   const client = { id: clientSnap.id, ...clientSnap.data() };
   const profileSnap = await getDoc(doc(db, COLLECTIONS.clientProfiles, client.id));
   const profile = profileSnap.exists() ? profileSnap.data() : null;
+  const verificationSnap = await getDoc(doc(db, COLLECTIONS.clientVerifications, client.id));
+  const verification = verificationSnap.exists() ? verificationSnap.data() : null;
+  const latestPnvRequest = await getLatestPnvRequestForClient(client.id);
 
   state.selectedClientId = client.id;
   state.selectedPhone = client.phone || null;
-  renderClientProfile(client, profile);
+  renderClientProfile(client, profile, verification, latestPnvRequest);
   await loadHistory(client.id);
   await loadOrders(client.id);
 }
 
-function renderClientProfile(client, profile) {
+function renderClientProfile(client, profile, verification, latestPnvRequest) {
   const financialStatus = !client.freeFirstSupportUsed
     ? "primeiro atendimento gratis pendente"
     : (client.credits ?? 0) > 0
       ? "com credito"
       : "sem credito";
+  const verificationStatus = verification?.status || "pending";
+  const verificationReason = verification?.mismatchReason || latestPnvRequest?.reason || null;
+  const latestPnvText = latestPnvRequest
+    ? `${latestPnvRequest.status || "-"} em ${formatDate(latestPnvRequest.updatedAt || latestPnvRequest.createdAt)}`
+    : "-";
 
   profileContainer.className = "";
   profileContainer.innerHTML = `
@@ -235,12 +250,19 @@ function renderClientProfile(client, profile) {
       <div><strong>Total gratis</strong>${profile?.totalFreeSessions ?? 0}</div>
       <div><strong>Creditos comprados</strong>${profile?.totalCreditsPurchased ?? 0}</div>
       <div><strong>Creditos usados</strong>${profile?.totalCreditsUsed ?? 0}</div>
+      <div><strong>Status verificacao</strong>${verificationStatusLabel(verificationStatus)}</div>
+      <div><strong>Telefone verificado</strong>${verification?.verifiedPhone || "-"}</div>
+      <div><strong>Ultima tentativa PNV</strong>${latestPnvText}</div>
+      <div><strong>Motivo tecnico</strong>${verificationReason || "-"}</div>
       <div><strong>Observacoes</strong>${client.notes || "-"}</div>
     </div>
     <div class="profile-actions">
       <button type="button" id="btn-add-note">Adicionar observacao</button>
       <button type="button" id="btn-add-credit">Adicionar credito manualmente</button>
       <button type="button" id="btn-remove-credit">Remover credito manualmente</button>
+      <button type="button" id="btn-request-manual-pnv">Solicitar fallback manual</button>
+      <button type="button" id="btn-mark-verified-manual">Confirmar verificacao manual</button>
+      <button type="button" id="btn-mark-mismatch">Marcar divergente</button>
       <button type="button" id="btn-close-session">Registrar atendimento concluido</button>
     </div>
   `;
@@ -267,6 +289,33 @@ function renderClientProfile(client, profile) {
       if (!Number.isFinite(amount) || amount <= 0) return;
       await adjustCredits(client.id, -Math.floor(amount));
       await loadClientProfile(client.id);
+    });
+
+  profileContainer.querySelector("#btn-request-manual-pnv")
+    .addEventListener("click", async () => {
+      await requestManualVerification(client);
+      await loadClientProfile(client.id);
+      await loadQueue();
+    });
+
+  profileContainer.querySelector("#btn-mark-verified-manual")
+    .addEventListener("click", async () => {
+      const manualPhone = normalizePhone(prompt("Informe o telefone confirmado manualmente:", client.phone || "") || "");
+      if (!manualPhone) {
+        alert("Telefone invalido.");
+        return;
+      }
+      await confirmManualVerification(client, manualPhone);
+      await loadClientProfile(client.id);
+      await loadQueue();
+    });
+
+  profileContainer.querySelector("#btn-mark-mismatch")
+    .addEventListener("click", async () => {
+      const reason = prompt("Motivo da divergencia:", "phone_divergent_manual") || "phone_divergent_manual";
+      await markVerificationMismatch(client, reason);
+      await loadClientProfile(client.id);
+      await loadQueue();
     });
 
   profileContainer.querySelector("#btn-close-session")
@@ -350,6 +399,101 @@ async function loadOrders(clientId = null) {
       <div>WhatsApp: ${order.whatsappRequested ? "Sim" : "Nao"}</div>
     `;
     ordersList.appendChild(item);
+  });
+}
+
+async function getLatestPnvRequestForClient(clientId) {
+  const snap = await getDocs(collection(db, COLLECTIONS.pnvRequests));
+  return snap.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .filter((request) => request.clientId === clientId)
+    .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0))[0] || null;
+}
+
+async function resolveClientUidByClientId(clientId) {
+  const linksSnap = await getDocs(collection(db, COLLECTIONS.clientAppLinks));
+  const link = linksSnap.docs
+    .map((item) => item.data())
+    .find((row) => row.clientId === clientId);
+  return link?.clientUid || null;
+}
+
+async function requestManualVerification(client) {
+  const now = Date.now();
+  const clientUid = await resolveClientUidByClientId(client.id);
+  await addDoc(collection(db, COLLECTIONS.pnvRequests), {
+    clientUid,
+    clientId: client.id,
+    phone: client.phone || null,
+    status: "manual_pending",
+    manualFallback: true,
+    reason: "manual_requested_by_technician",
+    source: "tech_panel",
+    createdAt: now,
+    updatedAt: now
+  });
+  await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
+    clientId: client.id,
+    primaryPhone: client.phone || null,
+    verifiedPhone: null,
+    status: "manual_required",
+    mismatchReason: "manual_requested_by_technician",
+    lastVerificationAt: now,
+    updatedAt: now
+  }, { merge: true });
+}
+
+async function confirmManualVerification(client, verifiedPhone) {
+  const now = Date.now();
+  const clientUid = await resolveClientUidByClientId(client.id);
+  await setDoc(doc(db, COLLECTIONS.clients, client.id), {
+    phone: verifiedPhone,
+    updatedAt: now
+  }, { merge: true });
+  await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
+    clientId: client.id,
+    primaryPhone: verifiedPhone,
+    verifiedPhone,
+    status: "verified",
+    mismatchReason: null,
+    lastVerificationAt: now,
+    updatedAt: now
+  }, { merge: true });
+  await addDoc(collection(db, COLLECTIONS.pnvRequests), {
+    clientUid,
+    clientId: client.id,
+    phone: verifiedPhone,
+    status: "processed",
+    manualFallback: true,
+    reason: "manual_verified_by_technician",
+    source: "tech_panel",
+    createdAt: now,
+    updatedAt: now
+  });
+}
+
+async function markVerificationMismatch(client, reason) {
+  const now = Date.now();
+  const clientUid = await resolveClientUidByClientId(client.id);
+  await setDoc(doc(db, COLLECTIONS.clientVerifications, client.id), {
+    clientId: client.id,
+    primaryPhone: client.phone || null,
+    verifiedPhone: null,
+    status: "mismatch",
+    mismatchReason: reason,
+    lastVerificationAt: now,
+    updatedAt: now
+  }, { merge: true });
+  await addDoc(collection(db, COLLECTIONS.pnvRequests), {
+    clientUid,
+    clientId: client.id,
+    phone: client.phone || null,
+    status: "manual_pending",
+    manualFallback: true,
+    reason: reason || "phone_divergent_manual",
+    source: "tech_panel",
+    createdAt: now,
+    updatedAt: now
   });
 }
 
@@ -514,6 +658,34 @@ function deriveClientStatus(client) {
   if (!client.freeFirstSupportUsed) return "first_support_pending";
   if ((client.credits ?? 0) > 0) return "with_credit";
   return "without_credit";
+}
+
+function verificationStatusLabel(status) {
+  switch (status) {
+    case "verified":
+      return "Verificado";
+    case "manual_required":
+      return "Manual necessario";
+    case "mismatch":
+      return "Divergente";
+    case "pending":
+    default:
+      return "Pendente";
+  }
+}
+
+function verificationBadgeClass(status) {
+  switch (status) {
+    case "verified":
+      return "ok";
+    case "manual_required":
+      return "danger";
+    case "mismatch":
+      return "danger";
+    case "pending":
+    default:
+      return "warn";
+  }
 }
 
 function normalizePhone(value) {

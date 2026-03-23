@@ -73,6 +73,7 @@ dependencies {
     implementation("com.google.firebase:firebase-messaging-ktx")
     // (opcional) se quiser auth anônima para separar usuários
     implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-pnv:16.0.0")
 
     implementation("com.google.firebase:firebase-analytics")
 
