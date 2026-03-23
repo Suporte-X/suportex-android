@@ -1221,14 +1221,32 @@ class MainActivity : ComponentActivity() {
         pendingSupportSessionId = null
         pendingSupportStartContext = null
 
-        val req = Request.Builder()
-            .url("${Conn.SERVER_BASE}/api/requests/$requestId")
-            .delete()
-            .build()
-        http.newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: java.io.IOException) = onDone()
-            override fun onResponse(call: Call, response: Response) = onDone()
-        })
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                if (::socket.isInitialized) {
+                    socket.emit("support:cancel", JSONObject().apply {
+                        put("requestId", requestId)
+                    })
+                }
+            }
+
+            val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }
+                .getOrDefault("")
+            val reqBuilder = Request.Builder()
+                .url("${Conn.SERVER_BASE}/api/client/requests/$requestId")
+                .delete()
+            if (idToken.isNotBlank()) {
+                reqBuilder.addHeader("Authorization", "Bearer $idToken")
+                reqBuilder.addHeader("x-id-token", idToken)
+            }
+
+            runCatching {
+                http.newCall(reqBuilder.build()).execute().use { _ -> }
+            }.onFailure { error ->
+                Log.w("SXS/Main", "Falha ao cancelar request no backend", error)
+            }
+            onDone()
+        }
     }
 
     private fun startScreenShareFlow(fromCommand: Boolean = false) {
