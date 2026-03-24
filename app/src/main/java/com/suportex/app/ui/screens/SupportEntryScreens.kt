@@ -65,7 +65,15 @@ fun SupportHomeScreen(
     val clientName = homeSnapshot.client?.name
     val isRegisteredClient = homeSnapshot.isRegisteredClient
     val supportBlockedByCredits = homeSnapshot.isRegisteredWithoutCredit
-    val showPurchaseShortcut = isRegisteredClient && !homeSnapshot.freeFirstSupportPending
+    val showPurchaseShortcut = homeSnapshot.shouldShowPurchaseEntry
+    val supportButtonLabel = when {
+        !isRegisteredClient -> "SOLICITAR SUPORTE"
+        homeSnapshot.freeFirstSupportPending -> "SOLICITAR SUPORTE (1º GRÁTIS)"
+        else -> {
+            val credits = homeSnapshot.creditsAvailable
+            "SOLICITAR SUPORTE ($credits CRÉDITO${if (credits == 1) "" else "S"})"
+        }
+    }
     val firstSupportText = if (homeSnapshot.freeFirstSupportPending) {
         "Primeiro atendimento grátis disponível"
     } else {
@@ -106,7 +114,7 @@ fun SupportHomeScreen(
                 ButtonDefaults.buttonColors()
             }
         ) {
-            Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold)
+            Text(supportButtonLabel, fontWeight = FontWeight.Bold)
         }
 
         if (showPurchaseShortcut) {

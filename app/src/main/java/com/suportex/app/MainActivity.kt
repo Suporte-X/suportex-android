@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -1461,6 +1462,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 var selectedPackage by remember { mutableStateOf<CreditPackageRecord?>(null) }
+                var autoOpenedPurchaseClientId by rememberSaveable { mutableStateOf<String?>(null) }
 
                 BackHandler {
                     when (current) {
@@ -1528,6 +1530,22 @@ class MainActivity : ComponentActivity() {
                                 selectedPackage = snapshot.packages.firstOrNull()
                             }
                         }
+                    }
+                }
+
+                LaunchedEffect(current, homeSnapshot.client?.id, homeSnapshot.shouldAutoOpenPurchase) {
+                    val currentClientId = homeSnapshot.client?.id
+                    if (
+                        current == Screen.HOME &&
+                        homeSnapshot.shouldAutoOpenPurchase &&
+                        !currentClientId.isNullOrBlank() &&
+                        autoOpenedPurchaseClientId != currentClientId
+                    ) {
+                        if (selectedPackage == null) {
+                            selectedPackage = homeSnapshot.packages.firstOrNull()
+                        }
+                        autoOpenedPurchaseClientId = currentClientId
+                        current = Screen.PURCHASE_CREDITS
                     }
                 }
 

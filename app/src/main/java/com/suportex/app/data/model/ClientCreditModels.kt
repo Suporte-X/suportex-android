@@ -90,9 +90,20 @@ data class ClientHomeSnapshot(
     val verification: ClientVerificationRecord?,
     val packages: List<CreditPackageRecord>
 ) {
+    private val hasRecordedSupport: Boolean
+        get() = (client?.supportsUsed ?: 0) > 0 || (clientMeta?.totalSessions ?: 0) > 0
+    private val firstSupportWindowReached: Boolean
+        get() {
+            val marker = clientMeta?.lastSupportAt ?: 0L
+            if (marker <= 0L) return hasRecordedSupport
+            return System.currentTimeMillis() - marker >= FIRST_SUPPORT_PURCHASE_DELAY_MS
+        }
+
     val isRegisteredClient: Boolean get() = client != null
     val creditsAvailable: Int get() = client?.credits ?: 0
     val freeFirstSupportPending: Boolean get() = client?.freeFirstSupportUsed == false || client == null
+    val shouldShowPurchaseEntry: Boolean get() = isRegisteredClient && hasRecordedSupport && firstSupportWindowReached
+    val shouldAutoOpenPurchase: Boolean get() = shouldShowPurchaseEntry && isRegisteredWithoutCredit
     val lifecycleState: ClientLifecycleState
         get() = when {
             client == null -> ClientLifecycleState.UNREGISTERED
@@ -110,6 +121,8 @@ data class ClientHomeSnapshot(
             ClientVerificationState.NOT_VERIFIED
         }
 }
+
+private const val FIRST_SUPPORT_PURCHASE_DELAY_MS = 5 * 60 * 1000L
 
 enum class ClientLifecycleState {
     UNREGISTERED,
