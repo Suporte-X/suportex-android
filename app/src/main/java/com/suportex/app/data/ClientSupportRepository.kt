@@ -62,16 +62,20 @@ class ClientSupportRepository(
         val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
         val client = resolvedClient?.client
         val meta = if (client != null) {
-            clientProfiles.document(client.id).get().await().toClientMetaRecord(client.id)
+            runCatching {
+                clientProfiles.document(client.id).get().await().toClientMetaRecord(client.id)
+            }.getOrNull()
         } else {
             null
         }
         val verification = if (client != null) {
-            syncVerificationStatus(
-                client = client,
-                clientUid = clientUid,
-                verifiedPhone = normalizedPhone
-            )
+            runCatching {
+                syncVerificationStatus(
+                    client = client,
+                    clientUid = clientUid,
+                    verifiedPhone = normalizedPhone
+                )
+            }.getOrNull()
         } else {
             null
         }
@@ -92,24 +96,28 @@ class ClientSupportRepository(
     ): SupportAccessDecision {
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(fallbackVerifiedPhone)
-        val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+        val resolvedClient = runCatching {
+            resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+        }.getOrNull()
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
         var client = resolvedClient?.client
         var ensuredAsNewClient = false
 
         if (client == null) {
-            val ensured = when {
-                normalizedPhone != null -> ensureClientByPhoneWithUid(
-                    normalizedPhone = normalizedPhone,
-                    clientUid = sanitizedUid,
-                    displayName = null
-                )
-                sanitizedUid != null -> ensureClientByUid(
-                    clientUid = sanitizedUid,
-                    displayName = null
-                )
-                else -> null
-            }
+            val ensured = runCatching {
+                when {
+                    normalizedPhone != null -> ensureClientByPhoneWithUid(
+                        normalizedPhone = normalizedPhone,
+                        clientUid = sanitizedUid,
+                        displayName = null
+                    )
+                    sanitizedUid != null -> ensureClientByUid(
+                        clientUid = sanitizedUid,
+                        displayName = null
+                    )
+                    else -> null
+                }
+            }.getOrNull()
             client = ensured?.client
             ensuredAsNewClient = ensured?.isNewClient == true
             if (sanitizedUid != null && client != null) {
@@ -889,9 +897,10 @@ class ClientSupportRepository(
     }
 
     private suspend fun resolveLinkedClientByUid(clientUid: String): ClientRecord? {
-        val linkSnapshot = clientAppLinks.document(clientUid).get().await()
+        val linkSnapshot = runCatching { clientAppLinks.document(clientUid).get().await() }.getOrNull()
+            ?: return null
         val clientId = linkSnapshot.getString("clientId")?.takeIf { it.isNotBlank() } ?: return null
-        return clients.document(clientId).get().await().toClientRecord()
+        return runCatching { clients.document(clientId).get().await().toClientRecord() }.getOrNull()
     }
 
     private suspend fun upsertClientAppLink(
@@ -900,16 +909,18 @@ class ClientSupportRepository(
         phone: String?
     ) {
         val now = System.currentTimeMillis()
-        clientAppLinks.document(clientUid).set(
-            mapOf(
-                "clientUid" to clientUid,
-                "clientId" to clientId,
-                "phone" to phone,
-                "updatedAt" to now,
-                "createdAt" to now
-            ),
-            SetOptions.merge()
-        ).await()
+        runCatching {
+            clientAppLinks.document(clientUid).set(
+                mapOf(
+                    "clientUid" to clientUid,
+                    "clientId" to clientId,
+                    "phone" to phone,
+                    "updatedAt" to now,
+                    "createdAt" to now
+                ),
+                SetOptions.merge()
+            ).await()
+        }
     }
 
     private suspend fun syncVerificationStatus(
@@ -1002,18 +1013,22 @@ class ClientSupportRepository(
     ): DocumentSnapshot? {
         val docs = mutableListOf<DocumentSnapshot>()
         clientUid?.trim()?.takeIf { it.isNotBlank() }?.let { uid ->
-            val byUid = pnvRequests
-                .whereEqualTo("clientUid", uid)
-                .get()
-                .await()
-            docs.addAll(byUid.documents)
+            val byUid = runCatching {
+                pnvRequests
+                    .whereEqualTo("clientUid", uid)
+                    .get()
+                    .await()
+            }.getOrNull()
+            if (byUid != null) docs.addAll(byUid.documents)
         }
         clientId?.trim()?.takeIf { it.isNotBlank() }?.let { id ->
-            val byClient = pnvRequests
-                .whereEqualTo("clientId", id)
-                .get()
-                .await()
-            docs.addAll(byClient.documents)
+            val byClient = runCatching {
+                pnvRequests
+                    .whereEqualTo("clientId", id)
+                    .get()
+                    .await()
+            }.getOrNull()
+            if (byClient != null) docs.addAll(byClient.documents)
         }
         return docs
             .distinctBy { it.id }
