@@ -957,6 +957,32 @@ class MainActivity : ComponentActivity() {
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
 
+        socket.on("support:error") { args ->
+            val data = args.getOrNull(0) as? JSONObject
+            val errorCode = data?.optString("error", "")?.trim().orEmpty()
+            val backendMessage = data?.optString("message", "")?.trim()?.takeIf { it.isNotBlank() }
+            val feedbackMessage = when (errorCode) {
+                "credit_required" -> "Sem credito disponivel. Compre creditos para solicitar novo atendimento."
+                else -> backendMessage ?: "Nao foi possivel solicitar suporte agora."
+            }
+
+            val localSupportId = pendingSupportSessionId
+            pendingSupportSessionId = null
+            pendingSupportStartContext = null
+            if (!localSupportId.isNullOrBlank()) {
+                lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
+                }
+            }
+
+            runOnUiThread {
+                setRequestIdFromSocket?.invoke(null)
+                setSessionIdFromSocket?.invoke(null)
+                setScreenFromSocket?.invoke(Screen.HOME)
+                setSystemMessageFromLauncher?.invoke(feedbackMessage)
+            }
+        }
+
         // tecnico aceitou -> recebemos sessionId e (opcional) techName
         socket.on("support:accepted") { args ->
             val data = args.getOrNull(0) as? JSONObject ?: return@on
@@ -998,6 +1024,37 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 setSessionIdFromSocket?.invoke(sid)
                 setScreenFromSocket?.invoke(Screen.SESSION)
+            }
+        }
+
+        socket.on("client:verification:trigger") { args ->
+            val data = args.getOrNull(0) as? JSONObject ?: return@on
+            val serverClientUid = data.optString("clientUid", "").trim().takeIf { it.isNotBlank() }
+            val serverClientId = data.optString("clientId", "").trim().takeIf { it.isNotBlank() }
+            val serverPhone = data.optString("phone", "").trim().takeIf { it.isNotBlank() }
+            val serverSupportSessionId = data.optString("supportSessionId", "").trim().takeIf { it.isNotBlank() }
+
+            lifecycleScope.launch(Dispatchers.IO) {
+                val resolvedUid = serverClientUid
+                    ?: runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+                if (resolvedUid.isNullOrBlank()) return@launch
+
+                val startContext = SupportStartContext(
+                    clientId = serverClientId,
+                    phone = serverPhone,
+                    isNewClient = false,
+                    isFreeFirstSupport = false,
+                    creditsToConsume = 0
+                )
+
+                runOnUiThread {
+                    setSystemMessageFromLauncher?.invoke("Confirmacao de numero solicitada para concluir o cadastro.")
+                    launchPnvVerificationFlow(
+                        clientUid = resolvedUid,
+                        startContext = startContext,
+                        localSupportSessionId = serverSupportSessionId ?: pendingSupportSessionId
+                    )
+                }
             }
         }
 

@@ -110,8 +110,9 @@ class ClientSupportRepository(
 
         if (client == null) {
             val ensured = when {
-                normalizedPhone != null -> ensureClientByPhone(
+                normalizedPhone != null -> ensureClientByPhoneWithUid(
                     normalizedPhone = normalizedPhone,
+                    clientUid = sanitizedUid,
                     displayName = null
                 )
                 sanitizedUid != null -> ensureClientByUid(
@@ -337,8 +338,12 @@ class ClientSupportRepository(
         val normalizedPhone = normalizePhone(verifiedPhone) ?: return null
         val now = System.currentTimeMillis()
         val pnvRequestExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_PNV_REQUESTS)
-        val ensured = ensureClientByPhone(normalizedPhone = normalizedPhone, displayName = null)
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+        val ensured = ensureClientByPhoneWithUid(
+            normalizedPhone = normalizedPhone,
+            clientUid = sanitizedUid,
+            displayName = null
+        )
 
         if (sanitizedUid != null) {
             upsertClientAppLink(
@@ -681,6 +686,65 @@ class ClientSupportRepository(
         val clientId = clientDocIdFromPhone(normalizedPhone)
         return ensureClientRecord(
             clientId = clientId,
+            normalizedPhone = normalizedPhone,
+            displayName = displayName
+        )
+    }
+
+    private suspend fun ensureClientByPhoneWithUid(
+        normalizedPhone: String,
+        clientUid: String?,
+        displayName: String?
+    ): EnsureClientResult {
+        val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
+        if (sanitizedUid == null) {
+            return ensureClientByPhone(
+                normalizedPhone = normalizedPhone,
+                displayName = displayName
+            )
+        }
+
+        val linkedClientId = runCatching {
+            clientAppLinks.document(sanitizedUid)
+                .get()
+                .await()
+                .getString("clientId")
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+
+        val candidateIds = listOfNotNull(
+            linkedClientId,
+            clientDocIdFromUid(sanitizedUid),
+            clientDocIdFromPhone(normalizedPhone)
+        ).distinct()
+
+        var bestClientId: String? = null
+        var bestScore = Int.MIN_VALUE
+        for (candidateId in candidateIds) {
+            val existing = runCatching { clients.document(candidateId).get().await() }.getOrNull()
+            if (existing?.exists() == true) {
+                val supportsUsed = (existing.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
+                val freeFirstSupportUsed = existing.getBoolean("freeFirstSupportUsed") ?: false
+                val profileCompleted = existing.getBoolean("profileCompleted") ?: false
+                val score = (if (freeFirstSupportUsed) 1000 else 0) +
+                    (supportsUsed * 100) +
+                    (if (profileCompleted) 10 else 0)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestClientId = candidateId
+                }
+            }
+        }
+        if (!bestClientId.isNullOrBlank()) {
+            return ensureClientRecord(
+                clientId = bestClientId,
+                normalizedPhone = normalizedPhone,
+                displayName = displayName
+            )
+        }
+
+        return ensureClientRecord(
+            clientId = clientDocIdFromPhone(normalizedPhone),
             normalizedPhone = normalizedPhone,
             displayName = displayName
         )
