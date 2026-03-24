@@ -1078,7 +1078,15 @@ class ClientSupportRepository(
         if (cleaned.isBlank()) return null
         val digits = cleaned.filter(Char::isDigit)
         if (digits.length < 10) return null
-        return if (cleaned.startsWith("+")) cleaned else "+$digits"
+        if (cleaned.startsWith("+")) return "+$digits"
+        if (cleaned.startsWith("00") && digits.length > 2) return "+${digits.drop(2)}"
+        if ((digits.length == 10 || digits.length == 11) && !digits.startsWith(DEFAULT_PHONE_COUNTRY_CODE)) {
+            return "+$DEFAULT_PHONE_COUNTRY_CODE$digits"
+        }
+        if ((digits.length == 12 || digits.length == 13) && digits.startsWith(DEFAULT_PHONE_COUNTRY_CODE)) {
+            return "+$digits"
+        }
+        return "+$digits"
     }
 
     private fun CreditPackageRecord.toMap(): Map<String, Any> = mapOf(
@@ -1194,6 +1202,7 @@ class ClientSupportRepository(
         const val PNV_REQUEST_STATUS_PENDING = "pending"
         const val PNV_REQUEST_STATUS_MANUAL_PENDING = "manual_pending"
         const val PNV_REQUEST_STATUS_PROCESSED = "processed"
+        private const val DEFAULT_PHONE_COUNTRY_CODE = "55"
     }
 }
 
