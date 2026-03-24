@@ -162,4 +162,8 @@ sealed class SupportAccessDecision {
         val client: ClientRecord,
         val packages: List<CreditPackageRecord>
     ) : SupportAccessDecision()
+
+    data class BlockedUnavailable(
+        val message: String
+    ) : SupportAccessDecision()
 }

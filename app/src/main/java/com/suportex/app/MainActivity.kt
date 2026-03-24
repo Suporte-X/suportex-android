@@ -50,7 +50,6 @@ import com.suportex.app.data.SessionRepository
 import com.suportex.app.data.SessionState
 import com.suportex.app.data.SessionTelemetry
 import com.suportex.app.data.SessionTechInfo
-import com.suportex.app.data.model.ClientFinancialStatus
 import com.suportex.app.data.model.ClientHomeSnapshot
 import com.suportex.app.data.model.CreditPackageRecord
 import com.suportex.app.data.model.SupportAccessDecision
@@ -1113,21 +1112,11 @@ class MainActivity : ComponentActivity() {
                 )
             }.getOrElse {
                 Log.e("SXS/Main", "Falha ao verificar acesso de suporte", it)
-                SupportAccessDecision.Allowed(
-                    startContext = SupportStartContext(
-                        clientId = null,
-                        phone = firebasePhone,
-                        isNewClient = true,
-                        isFreeFirstSupport = true,
-                        creditsToConsume = 0
-                    ),
-                    financialStatus = ClientFinancialStatus.UNREGISTERED_NEW_CLIENT,
-                    client = null
+                SupportAccessDecision.BlockedUnavailable(
+                    message = "Nao foi possivel validar o acesso agora. Tente novamente em instantes."
                 )
             }
-            if (decision is SupportAccessDecision.Allowed) {
-                pendingSupportStartContext = decision.startContext
-            }
+            pendingSupportStartContext = (decision as? SupportAccessDecision.Allowed)?.startContext
             runOnUiThread { onDecision(decision) }
         }
     }
@@ -1590,6 +1579,14 @@ class MainActivity : ComponentActivity() {
                                             Toast.makeText(
                                                 this@MainActivity,
                                                 "Sem credito disponivel",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+
+                                        is SupportAccessDecision.BlockedUnavailable -> {
+                                            Toast.makeText(
+                                                this@MainActivity,
+                                                decision.message,
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         }

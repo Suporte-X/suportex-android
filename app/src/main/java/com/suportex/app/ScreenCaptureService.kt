@@ -629,9 +629,9 @@ class ScreenCaptureService : Service() {
             for (s in report.statsMap.values) {
                 when (s.type) {
                     "outbound-rtp" -> {
-                        (s.members["bytesSent"] as? Long)?.let { bytesSent = it }
-                        (s.members["framesEncoded"] as? Long)?.let { framesEncoded = it }
-                        (s.members["framesPerSecond"] as? Double)?.let { fps = it.toInt() }
+                        (s.members["bytesSent"] as? Number)?.toLong()?.let { bytesSent = it }
+                        (s.members["framesEncoded"] as? Number)?.toLong()?.let { framesEncoded = it }
+                        (s.members["framesPerSecond"] as? Number)?.toDouble()?.let { fps = it.toInt() }
                         (s.members["qualityLimitationReason"] as? String)?.let { qlim = it }
                         (s.members["encoderImplementation"] as? String)?.let { encoderImpl = it }
                         (s.members["packetsLost"] as? Number)?.toLong()?.let { packetsLost = it }
@@ -641,7 +641,7 @@ class ScreenCaptureService : Service() {
                     }
                     "candidate-pair" -> {
                         if (s.members["selected"] == true) {
-                            (s.members["currentRoundTripTime"] as? Double)?.let { rttMs = it * 1000.0 }
+                            (s.members["currentRoundTripTime"] as? Number)?.toDouble()?.let { rttMs = it * 1000.0 }
                         }
                     }
                 }
@@ -683,8 +683,8 @@ class ScreenCaptureService : Service() {
             for (s in report.statsMap.values) {
                 when (s.type) {
                     "outbound-rtp" -> {
-                        (s.members["bytesSent"] as? Long)?.let { bytesSent = it }
-                        (s.members["framesPerSecond"] as? Double)?.let { fps = it.toInt() }
+                        (s.members["bytesSent"] as? Number)?.toLong()?.let { bytesSent = it }
+                        (s.members["framesPerSecond"] as? Number)?.toDouble()?.let { fps = it.toInt() }
                         (s.members["qualityLimitationReason"] as? String)?.let { qlim = it }
                         (s.members["packetsLost"] as? Number)?.toLong()?.let { packetsLost = it }
                     }
@@ -693,7 +693,7 @@ class ScreenCaptureService : Service() {
                     }
                     "candidate-pair" -> {
                         if (s.members["selected"] == true) {
-                            (s.members["currentRoundTripTime"] as? Double)?.let { rttMs = it * 1000.0 }
+                            (s.members["currentRoundTripTime"] as? Number)?.toDouble()?.let { rttMs = it * 1000.0 }
                         }
                     }
                 }

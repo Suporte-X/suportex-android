@@ -37,25 +37,14 @@ class ClientSupportRepository(
 
     suspend fun seedDefaultPackagesIfNeeded() {
         authRepository.ensureAnonAuth()
-        val defaults = SupportBillingConfig.defaultCreditPackages
-        val batch = db.batch()
-        var hasPendingWrite = false
-        defaults.forEach { pkg ->
-            val ref = creditPackages.document(pkg.id)
-            val existing = ref.get().await()
-            if (!existing.exists()) {
-                hasPendingWrite = true
-                batch.set(ref, pkg.toMap())
-            }
-        }
-        if (hasPendingWrite) {
-            batch.commit().await()
-        }
+        // Pacotes padrao sao publicados pelo backend/admin.
+        // O cliente Android nao deve tentar escrever em `credit_packages`.
     }
 
     suspend fun listCreditPackages(): List<CreditPackageRecord> {
         authRepository.ensureAnonAuth()
-        val snapshot = creditPackages.get().await()
+        val snapshot = runCatching { creditPackages.get().await() }.getOrNull()
+            ?: return SupportBillingConfig.defaultCreditPackages
         val rows = snapshot.documents.mapNotNull { it.toCreditPackageRecord() }
             .filter { it.active }
             .sortedBy { it.displayOrder }
