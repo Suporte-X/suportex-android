@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<foreground-service-types xmlns:android="http://schemas.android.com/apk/res/android">
-    <service android:name=".ScreenCaptureService"
-        android:foregroundServiceType="mediaProjection"
-        android:description="@string/foreground_service_media_projection_p0" />
-</foreground-service-types>

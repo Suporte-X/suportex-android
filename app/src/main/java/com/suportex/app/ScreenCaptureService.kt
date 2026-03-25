@@ -341,7 +341,8 @@ class ScreenCaptureService : Service() {
                     pendingRemoteIce.forEach { safeAddIce(it) }
                     pendingRemoteIce.clear()
                     pc.createAnswer(object : SdpObserverAdapter() {
-                        override fun onCreateSuccess(answer: SessionDescription) {
+                        override fun onCreateSuccess(sdp: SessionDescription) {
+                            val answer = sdp
                             pc.setLocalDescription(object : SdpObserverAdapter() {
                                 override fun onSetSuccess() {
                                     writeAnswerEvent(answer)

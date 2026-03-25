@@ -1,5 +1,4 @@
 <resources>
     <string name="app_name">SuporteX</string>
     <string name="remote_accessibility_description">Permite o controle remoto com consentimento do cliente.</string>
-    <string name="foreground_service_media_projection_p0">Este serviço compartilha a tela do dispositivo com o técnico para suporte remoto.</string>
 </resources>

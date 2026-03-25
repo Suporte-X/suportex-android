@@ -2,6 +2,7 @@ package com.suportex.app.data
 
 import android.app.Activity
 import android.content.Context
+import androidx.core.content.edit
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.pnv.FirebasePhoneNumberVerification
 import kotlinx.coroutines.tasks.await
@@ -48,9 +49,9 @@ class FirebasePhoneIdentityProvider(
     }
 
     override suspend fun saveVerifiedPhoneNumber(phoneNumber: String?) {
-        prefs.edit()
-            .putString(KEY_VERIFIED_PHONE, phoneNumber?.trim()?.takeIf { it.isNotBlank() })
-            .apply()
+        prefs.edit {
+            putString(KEY_VERIFIED_PHONE, phoneNumber?.trim()?.takeIf { it.isNotBlank() })
+        }
     }
 
     override suspend fun checkPnvSupport(): PhonePnvSupportInfo {

@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import com.suportex.app.data.ClientSupportRepository
 import com.suportex.app.data.FirebasePhoneIdentityProvider
@@ -549,11 +550,7 @@ class MainActivity : ComponentActivity() {
             this,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
-        val overlayEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(this)
-        } else {
-            true
-        }
+        val overlayEnabled = Settings.canDrawOverlays(this)
         val permissionsSummary = buildPermissionsSummary(
             accessibilityEnabled = accessibilityEnabled,
             microphoneGranted = microphoneGranted,
@@ -796,7 +793,7 @@ class MainActivity : ComponentActivity() {
         runCatching {
             val outFile = File.createTempFile("sx_audio_", ".m4a", cacheDir)
             audioTempFile = outFile
-            val recorder = MediaRecorder().apply {
+            val recorder = createMediaRecorder().apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -814,6 +811,15 @@ class MainActivity : ComponentActivity() {
             audioTempFile = null
             setRecordingAudioFromActivity?.invoke(false)
             setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
+        }
+    }
+
+    private fun createMediaRecorder(): MediaRecorder {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            MediaRecorder(this)
+        } else {
+            @Suppress("DEPRECATION")
+            MediaRecorder()
         }
     }
 
@@ -1209,7 +1215,7 @@ class MainActivity : ComponentActivity() {
             "Plano escolhido: ${selectedPackage.name} por ${formatPriceLabel(selectedPackage.priceCents)}."
         val encoded = URLEncoder.encode(text, Charsets.UTF_8.name())
         val url = "https://wa.me/${SupportBillingConfig.OFFICIAL_WHATSAPP_NUMBER}?text=$encoded"
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        val intent = Intent(Intent.ACTION_VIEW, url.toUri())
         try {
             startActivity(intent)
             if (!currentClientId.isNullOrBlank()) {

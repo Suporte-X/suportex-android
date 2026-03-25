@@ -1,15 +1,13 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+﻿import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
-    // NOVO:
     id("com.google.gms.google-services")
 }
 
 android {
     namespace = "com.suportex.app"
-    // use um SDK estável que você tenha instalado:
     compileSdk = 36
 
     defaultConfig {
@@ -49,44 +47,37 @@ kotlin {
 }
 
 dependencies {
-    // Compose (mantém as suas)
-    implementation(platform("androidx.compose:compose-bom:2025.09.01"))
-    implementation("androidx.activity:activity-compose:1.9.0")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
-    // Ícones para os botões (microfone, anexo, telefone, etc.)
-    implementation("androidx.compose.material:material-icons-extended:1.7.2")
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.compose.material.icons.extended)
 
-    // OkHttp / WebRTC / Socket.IO (seus)
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("io.github.webrtc-sdk:android:137.7151.04")
-    implementation("io.socket:socket.io-client:2.1.0") { exclude(group = "org.json", module = "json") }
-    implementation("com.google.android.material:material:1.12.0")
+    implementation(libs.okhttp)
+    implementation(libs.webrtc)
+    implementation(libs.socket.io.client) {
+        exclude(group = "org.json", module = "json")
+    }
+    implementation(libs.material)
 
-    // --- NOVO: Firebase (use BOM para alinhar versões) ---
-    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
-    implementation("com.google.firebase:firebase-firestore-ktx")
-    implementation("com.google.firebase:firebase-messaging-ktx")
-    // (opcional) se quiser auth anônima para separar usuários
-    implementation("com.google.firebase:firebase-auth-ktx")
-    implementation("com.google.firebase:firebase-pnv:16.0.0")
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.firestore.ktx)
+    implementation(libs.firebase.messaging.ktx)
+    implementation(libs.firebase.auth.ktx)
+    implementation(libs.firebase.pnv)
+    implementation(libs.firebase.analytics)
 
-    implementation("com.google.firebase:firebase-analytics")
+    implementation(libs.kotlinx.coroutines.play.services)
 
-    // Coroutines helpers para Tasks.await()
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    implementation(libs.androidx.compose.animation)
 
-    // Testes…
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.5")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    implementation("androidx.compose.animation:animation")
-
-    // Áudio no chat
-    implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.coil.compose)
 }
