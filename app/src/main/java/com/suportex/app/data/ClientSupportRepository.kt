@@ -238,15 +238,84 @@ class ClientSupportRepository(
     ): Boolean {
         authRepository.ensureAnonAuth()
         val sessionRef = resolveSupportSessionRef(localSupportSessionId, realtimeSessionId) ?: return false
-        sessionRef.set(
-            mapOf(
-                "sessionId" to realtimeSessionId,
-                "status" to "in_progress",
-                "techName" to techName,
-                "updatedAt" to System.currentTimeMillis()
-            ),
-            SetOptions.merge()
-        ).await()
+        val now = System.currentTimeMillis()
+        db.runTransaction { tx ->
+            val sessionSnap = tx.get(sessionRef)
+            if (!sessionSnap.exists()) return@runTransaction false
+
+            val isFreeFirstSupport = sessionSnap.getBoolean("isFreeFirstSupport") ?: false
+            val billingAlreadyApplied = sessionSnap.getLong("billingAppliedAt") != null
+            val clientId = sessionSnap.getString("clientId")
+
+            tx.set(
+                sessionRef,
+                mapOf(
+                    "sessionId" to realtimeSessionId,
+                    "status" to "in_progress",
+                    "techName" to techName,
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )
+
+            if (isFreeFirstSupport && !billingAlreadyApplied && !clientId.isNullOrBlank()) {
+                val clientRef = clients.document(clientId)
+                val profileRef = clientProfiles.document(clientId)
+                val clientSnap = tx.get(clientRef)
+                val profileSnap = tx.get(profileRef)
+
+                val oldCredits = (clientSnap.getLong("credits") ?: 0L).toInt().coerceAtLeast(0)
+                val oldSupportsUsed = (clientSnap.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
+                val oldFreeUsed = clientSnap.getBoolean("freeFirstSupportUsed") ?: false
+
+                val supportsUsedAfter = oldSupportsUsed + 1
+                val freeUsedAfter = oldFreeUsed || isFreeFirstSupport
+
+                tx.set(
+                    clientRef,
+                    mapOf(
+                        "credits" to oldCredits,
+                        "supportsUsed" to supportsUsedAfter,
+                        "freeFirstSupportUsed" to freeUsedAfter,
+                        "status" to deriveClientStatus(oldCredits, freeUsedAfter),
+                        "updatedAt" to now
+                    ),
+                    SetOptions.merge()
+                )
+
+                val totalSessions = (profileSnap.getLong("totalSessions") ?: 0L).toInt()
+                val totalPaid = (profileSnap.getLong("totalPaidSessions") ?: 0L).toInt()
+                val totalFree = (profileSnap.getLong("totalFreeSessions") ?: 0L).toInt()
+                val totalCreditsPurchased = (profileSnap.getLong("totalCreditsPurchased") ?: 0L).toInt()
+                val totalCreditsUsed = (profileSnap.getLong("totalCreditsUsed") ?: 0L).toInt()
+
+                tx.set(
+                    profileRef,
+                    mapOf(
+                        "clientId" to clientId,
+                        "totalSessions" to totalSessions + 1,
+                        "totalPaidSessions" to totalPaid,
+                        "totalFreeSessions" to totalFree + 1,
+                        "totalCreditsPurchased" to totalCreditsPurchased,
+                        "totalCreditsUsed" to totalCreditsUsed,
+                        "lastSupportAt" to now,
+                        "updatedAt" to now
+                    ),
+                    SetOptions.merge()
+                )
+
+                tx.set(
+                    sessionRef,
+                    mapOf(
+                        "billingAppliedAt" to now,
+                        "updatedAt" to now
+                    ),
+                    SetOptions.merge()
+                )
+            }
+
+            true
+        }.await()
         return true
     }
 

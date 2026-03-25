@@ -103,7 +103,7 @@ data class ClientHomeSnapshot(
     val creditsAvailable: Int get() = client?.credits ?: 0
     val freeFirstSupportPending: Boolean get() = client?.freeFirstSupportUsed == false || client == null
     val shouldShowPurchaseEntry: Boolean get() = isRegisteredClient && hasRecordedSupport && firstSupportWindowReached
-    val shouldAutoOpenPurchase: Boolean get() = shouldShowPurchaseEntry && isRegisteredWithoutCredit
+    val shouldAutoOpenPurchase: Boolean get() = false
     val lifecycleState: ClientLifecycleState
         get() = when {
             client == null -> ClientLifecycleState.UNREGISTERED

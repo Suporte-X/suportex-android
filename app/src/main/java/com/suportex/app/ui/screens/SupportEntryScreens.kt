@@ -54,7 +54,6 @@ import java.util.Locale
 fun SupportHomeScreen(
     homeSnapshot: ClientHomeSnapshot,
     onRequestSupport: () -> Unit,
-    onBlockedSupportRequest: () -> Unit,
     onOpenPurchase: () -> Unit,
     onOpenHelp: () -> Unit,
     onOpenPrivacy: () -> Unit,
@@ -63,21 +62,16 @@ fun SupportHomeScreen(
 ) {
     var expandedPlans by rememberSaveable { mutableStateOf(false) }
     val clientName = homeSnapshot.client?.name
-    val isRegisteredClient = homeSnapshot.isRegisteredClient
     val supportBlockedByCredits = homeSnapshot.isRegisteredWithoutCredit
-    val showPurchaseShortcut = homeSnapshot.shouldShowPurchaseEntry
-    val supportButtonLabel = when {
-        !isRegisteredClient -> "SOLICITAR SUPORTE"
-        homeSnapshot.freeFirstSupportPending -> "SOLICITAR SUPORTE (1º GRÁTIS)"
-        else -> {
-            val credits = homeSnapshot.creditsAvailable
-            "SOLICITAR SUPORTE ($credits CRÉDITO${if (credits == 1) "" else "S"})"
-        }
-    }
-    val firstSupportText = if (homeSnapshot.freeFirstSupportPending) {
-        "Primeiro atendimento grátis disponível"
+    val freeFirstSupportPending = homeSnapshot.freeFirstSupportPending
+    val creditsAvailable = homeSnapshot.creditsAvailable.coerceAtLeast(0)
+    val supportsDone = (homeSnapshot.clientMeta?.totalSessions ?: homeSnapshot.client?.supportsUsed ?: 0)
+        .coerceAtLeast(0)
+    val creditValueColor = if (creditsAvailable == 0) Color(0xFFE63A3A) else MaterialTheme.colorScheme.onSurface
+    val supportButtonLabel = if (supportBlockedByCredits) {
+        "SOLICITAR SUPORTE (0 CRÉDITOS)"
     } else {
-        "Primeiro atendimento grátis já utilizado"
+        "SOLICITAR SUPORTE"
     }
 
     Column(
@@ -87,20 +81,104 @@ fun SupportHomeScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(48.dp))
+        if (freeFirstSupportPending) {
+            Text(
+                "1º Atendimento Grátis",
+                modifier = Modifier.fillMaxWidth(),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 17.sp
+            )
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expandedPlans = !expandedPlans },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Créditos:",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 17.sp
+                )
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    creditsAvailable.toString(),
+                    color = creditValueColor,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 17.sp
+                )
+                Spacer(Modifier.size(4.dp))
+                Icon(
+                    imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expandedPlans) "Ocultar status de créditos" else "Mostrar status de créditos"
+                )
+            }
+        }
+
+        if (!freeFirstSupportPending && expandedPlans) {
+            Spacer(Modifier.height(10.dp))
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 1.dp
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            "Créditos disponíveis: $creditsAvailable atendimento${if (creditsAvailable == 1) "" else "s"}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Icon(
+                            imageVector = Icons.Filled.ExpandLess,
+                            contentDescription = "Ocultar status de créditos",
+                            modifier = Modifier
+                                .clickable { expandedPlans = false }
+                                .padding(2.dp)
+                        )
+                    }
+
+                    if (!clientName.isNullOrBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "Cliente: $clientName",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = textMuted
+                        )
+                    }
+
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Atendimentos já realizados: $supportsDone",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = textMuted
+                    )
+
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(
+                        onClick = onOpenPurchase,
+                        modifier = Modifier.align(Alignment.Start)
+                    ) {
+                        Text("Adquirir mais créditos", color = Color(0xFFD4A400))
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
         Image(
             painter = painterResource(R.drawable.ic_suportex_logo),
             contentDescription = null,
             modifier = Modifier.size(180.dp)
         )
-        Spacer(Modifier.height(72.dp))
+        Spacer(Modifier.height(96.dp))
         Button(
-            onClick = {
-                if (supportBlockedByCredits) {
-                    onBlockedSupportRequest()
-                } else {
-                    onRequestSupport()
-                }
-            },
+            onClick = onRequestSupport,
+            enabled = !supportBlockedByCredits,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(64.dp),
@@ -117,82 +195,15 @@ fun SupportHomeScreen(
             Text(supportButtonLabel, fontWeight = FontWeight.Bold)
         }
 
-        if (showPurchaseShortcut) {
+        if (supportBlockedByCredits) {
             Spacer(Modifier.height(12.dp))
-            if (supportBlockedByCredits) {
-                Text(
-                    text = "Primeiro atendimento já utilizado. Para novo suporte, compre créditos.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF8A5A00),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-            }
             OutlinedButton(
                 onClick = onOpenPurchase,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp)
             ) {
-                Text(if (supportBlockedByCredits) "Comprar créditos agora" else "Comprar mais créditos")
-            }
-        }
-
-        if (isRegisteredClient) {
-            Spacer(Modifier.height(14.dp))
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                tonalElevation = 1.dp
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "Créditos disponíveis: ${homeSnapshot.creditsAvailable} atendimentos",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Icon(
-                            imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                            contentDescription = if (expandedPlans) "Fechar planos" else "Abrir planos",
-                            modifier = Modifier
-                                .clickable { expandedPlans = !expandedPlans }
-                                .padding(2.dp)
-                        )
-                    }
-
-                    if (!clientName.isNullOrBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "Cliente: $clientName",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = textMuted
-                        )
-                    }
-
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = firstSupportText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = textMuted
-                    )
-
-                    if (expandedPlans) {
-                        Spacer(Modifier.height(10.dp))
-                        CreditPackagesTable(packages = homeSnapshot.packages)
-                        Spacer(Modifier.height(8.dp))
-                        TextButton(
-                            onClick = onOpenPurchase,
-                            modifier = Modifier.align(Alignment.End)
-                        ) {
-                            Text("Comprar mais créditos")
-                        }
-                    }
-                }
+                Text("Comprar créditos agora")
             }
         }
 
@@ -467,3 +478,4 @@ private fun CreditPackageRecord.priceLabel(): String {
     val formatter = NumberFormat.getCurrencyInstance(Locale.forLanguageTag("pt-BR"))
     return formatter.format(priceCents / 100.0)
 }
+

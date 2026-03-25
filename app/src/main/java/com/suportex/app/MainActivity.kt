@@ -1598,13 +1598,6 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             },
-                            onBlockedSupportRequest = {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Sem credito disponivel",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            },
                             onOpenPurchase = {
                                 if (homeSnapshot.isRegisteredClient) {
                                     if (selectedPackage == null) {
