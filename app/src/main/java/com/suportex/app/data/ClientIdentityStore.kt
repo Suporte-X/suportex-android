@@ -1,7 +1,6 @@
 package com.suportex.app.data
 
 import android.content.Context
-import androidx.core.content.edit
 
 class ClientIdentityStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -11,10 +10,10 @@ class ClientIdentityStore(context: Context) {
     fun getDisplayName(): String? = prefs.getString(KEY_NAME, null)?.takeIf { it.isNotBlank() }
 
     fun save(phone: String, displayName: String?) {
-        prefs.edit {
-            putString(KEY_PHONE, phone)
-            putString(KEY_NAME, displayName?.takeIf { it.isNotBlank() })
-        }
+        prefs.edit()
+            .putString(KEY_PHONE, phone)
+            .putString(KEY_NAME, displayName?.takeIf { it.isNotBlank() })
+            .apply()
     }
 
     companion object {

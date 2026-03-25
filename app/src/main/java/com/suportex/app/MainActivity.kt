@@ -37,7 +37,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import com.suportex.app.data.ClientSupportRepository
@@ -147,7 +146,7 @@ class MainActivity : ComponentActivity() {
         val cur = p.getString("device_id", null)
         if (cur != null) return cur
         val gen = UUID.randomUUID().toString()
-        p.edit { putString("device_id", gen) }
+        p.edit().putString("device_id", gen).apply()
         return gen
     }
     @Suppress("unused")
