@@ -252,7 +252,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     setSystemMessageFromLauncher?.invoke(
-                        "Verificacao automatica indisponivel neste aparelho. Atendimento segue normalmente."
+                        "Verificacao automatica indisponivel neste aparelho/operadora. O tecnico pode validar por SMS no painel."
                     )
                     return@launch
                 }
