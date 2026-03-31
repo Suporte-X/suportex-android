@@ -330,39 +330,58 @@ class ClientSupportRepository(
     }
 
     suspend fun loadSupportQueueWaitStats(): SupportQueueWaitStats {
-        authRepository.ensureAnonAuth()
+        val clientUid = authRepository.ensureAnonAuth()
+        val linkedClientId = resolveLinkedClientId(clientUid)
 
-        val queueDepth = runCatching {
+        val byUid = runCatching {
             supportSessions
-                .whereEqualTo("status", "queued")
-                .get()
-                .await()
-                .size()
-        }.getOrDefault(0)
-
-        val targetSampleSize = queueDepth.coerceAtLeast(1).coerceAtMost(MAX_QUEUE_WAIT_SAMPLE)
-        val candidateLimit = (targetSampleSize * 5).coerceIn(10, 120).toLong()
-
-        val candidates = runCatching {
-            supportSessions
-                .orderBy("startedAt", Query.Direction.DESCENDING)
-                .limit(candidateLimit)
+                .whereEqualTo("clientUid", clientUid)
                 .get()
                 .await()
                 .documents
         }.getOrDefault(emptyList())
 
+        val byClientId = linkedClientId?.let { clientId ->
+            runCatching {
+                supportSessions
+                    .whereEqualTo("clientId", clientId)
+                    .get()
+                    .await()
+                    .documents
+            }.getOrDefault(emptyList())
+        }.orEmpty()
+
+        val candidates = (byUid + byClientId)
+            .distinctBy { it.id }
+            .sortedByDescending {
+                it.getLong("startedAt")
+                    ?: it.getLong("createdAt")
+                    ?: it.getLong("updatedAt")
+                    ?: 0L
+            }
+            .take(MAX_WAIT_CANDIDATES)
+
+        val queueDepth = candidates.count {
+            it.getString("status")
+                .orEmpty()
+                .lowercase() == "queued"
+        }
+        val targetSampleSize = MAX_QUEUE_WAIT_SAMPLE
+
         val waits = mutableListOf<Long>()
         for (doc in candidates) {
-            val startedAt = doc.getLong("startedAt") ?: continue
-            val status = doc.getString("status").orEmpty()
+            val status = doc.getString("status").orEmpty().lowercase()
             if (status != "in_progress" && status != "completed") continue
+
+            val startedAt = doc.getLong("startedAt") ?: doc.getLong("createdAt")
             val acceptedAt = doc.getLong("acceptedAt")
                 ?: if (status == "in_progress") doc.getLong("updatedAt") else null
-            if (acceptedAt == null) continue
+            val wait = when {
+                startedAt != null && acceptedAt != null -> acceptedAt - startedAt
+                else -> doc.getLong("waitTimeMs")
+            }
 
-            val wait = acceptedAt - startedAt
-            if (wait in 0L..MAX_VALID_WAIT_MILLIS) {
+            if (wait != null && wait in 0L..MAX_VALID_WAIT_MILLIS) {
                 waits.add(wait)
             }
             if (waits.size >= targetSampleSize) break
@@ -375,6 +394,17 @@ class ClientSupportRepository(
             usedSampleSize = waits.size,
             averageWaitMillis = averageWaitMillis
         )
+    }
+
+    private suspend fun resolveLinkedClientId(clientUid: String): String? {
+        return runCatching {
+            clientAppLinks.document(clientUid)
+                .get()
+                .await()
+                .getString("clientId")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
     }
 
     suspend fun cancelSupportRequest(localSupportSessionId: String?) {
@@ -1335,6 +1365,7 @@ class ClientSupportRepository(
         const val PNV_REQUEST_STATUS_PROCESSED = "processed"
         private const val DEFAULT_PHONE_COUNTRY_CODE = "55"
         private const val MAX_QUEUE_WAIT_SAMPLE = 30
+        private const val MAX_WAIT_CANDIDATES = 180
         private const val MAX_VALID_WAIT_MILLIS = 2 * 60 * 60 * 1000L
     }
 }
