@@ -1779,7 +1779,7 @@ private fun HomeScreen(
             shape = RoundedCornerShape(20.dp)
         ) { Text("SOLICITAR SUPORTE", fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(16.dp))
-        Text("Tempo medio de atendimento: 2-5 min", color = textMuted, fontSize = 16.sp)
+        Text("Tempo médio de atendimento: 2-5 min", color = textMuted, fontSize = 16.sp)
         Spacer(Modifier.weight(1f))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1815,7 +1815,7 @@ private fun HelpScreen(
         Text("Ajuda", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Guia rapido de atendimento", color = textMuted, fontSize = 13.sp)
+        Text("Guia rápido de atendimento", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1825,27 +1825,35 @@ private fun HelpScreen(
         ) {
             PolicySection(
                 title = "1. Como iniciar um atendimento",
-                body = "Toque em SOLICITAR SUPORTE e aguarde a conexao com um tecnico. Quando o atendimento for aceito, a sessao sera aberta automaticamente no aplicativo."
+                body = "Toque em SOLICITAR SUPORTE e aguarde a conexão com um técnico. Quando o atendimento for aceito, a sessão será aberta automaticamente no aplicativo."
             )
             PolicySection(
-                title = "2. Permissoes durante o suporte",
-                body = "Alguns atendimentos podem exigir permissoes temporarias, como compartilhamento de tela, envio de arquivos e acesso assistido. Essas permissoes sao opcionais e voce controla todas elas no app."
+                title = "2. Crédito e liberação de atendimento",
+                body = "O primeiro atendimento pode ser disponibilizado gratuitamente, conforme o status da sua conta. Depois disso, para novos atendimentos, é necessário ter créditos disponíveis no aplicativo."
             )
             PolicySection(
-                title = "3. Seguranca da sessao",
-                body = "Nenhuma acao remota e iniciada sem sua autorizacao explicita. Voce pode interromper o compartilhamento e revogar permissoes a qualquer momento."
+                title = "3. Compra de créditos",
+                body = "Na tela inicial, você pode abrir a área de créditos, escolher um pacote e solicitar a compra pelos canais oficiais. As opções de Cartão e PIX podem aparecer no app conforme a etapa de implantação."
             )
             PolicySection(
-                title = "4. Encerrar atendimento",
-                body = "Quando desejar, finalize o suporte pelo botao de encerramento na tela de sessao. Voce tambem pode interromper permissoes diretamente nas configuracoes do seu dispositivo."
+                title = "4. Permissões durante o suporte",
+                body = "Alguns atendimentos podem exigir permissões temporárias, como compartilhamento de tela, envio de arquivos, uso do microfone e acesso assistido. Essas permissões são opcionais e você controla todas elas no app."
             )
             PolicySection(
-                title = "5. Problemas comuns",
-                body = "Se a conexao estiver instavel, verifique internet, bateria e permissoes do app. Em caso de falha de acesso remoto, confira se o servico de acessibilidade do Suporte X esta ativado."
+                title = "5. Segurança da sessão",
+                body = "Nenhuma ação remota é iniciada sem sua autorização explícita. Você pode interromper o compartilhamento, desligar o acesso remoto e revogar permissões a qualquer momento."
             )
             PolicySection(
-                title = "6. Canais oficiais",
-                body = "Para suporte administrativo, duvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
+                title = "6. Encerrar atendimento",
+                body = "Quando desejar, finalize o suporte pelo botão de encerramento na tela de sessão. Você também pode interromper permissões diretamente nas configurações do seu dispositivo."
+            )
+            PolicySection(
+                title = "7. Problemas comuns",
+                body = "Se a conexão estiver instável, verifique internet, bateria, armazenamento e permissões do app. Em caso de falha de acesso remoto, confira se o serviço de acessibilidade do Suporte X está ativado."
+            )
+            PolicySection(
+                title = "8. Canais oficiais",
+                body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
             )
         }
     }
@@ -1870,10 +1878,10 @@ private fun PrivacyPolicyScreen(
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text("Politica de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+        Text("Política de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Ultima atualizacao: 11 de marco de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 31 de março de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1882,42 +1890,42 @@ private fun PrivacyPolicyScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                "A Suporte X valoriza a privacidade e a seguranca dos dados dos usuarios. Esta Politica de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informacoes durante a utilizacao do aplicativo e dos servicos de suporte tecnico remoto.",
+                "A Suporte X valoriza a privacidade e a segurança dos dados dos usuários. Esta Política de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informações durante a utilização do aplicativo e dos serviços de suporte técnico remoto.",
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
             Spacer(Modifier.height(14.dp))
             PolicySection(
                 title = "1. Dados que coletamos",
-                body = "Para a prestacao adequada do servico de suporte tecnico remoto, podemos coletar as seguintes informacoes:\n\n- Nome informado pelo usuario no aplicativo\n- Identificadores de sessao e atendimento\n- Informacoes tecnicas do dispositivo utilizado\n- Mensagens trocadas no chat de atendimento\n- Arquivos enviados durante o suporte tecnico\n- Registros tecnicos necessarios para diagnostico e resolucao de problemas\n\nEssas informacoes sao coletadas exclusivamente para viabilizar o funcionamento do servico de suporte."
+                body = "Para a prestação adequada do serviço, podemos coletar as seguintes informações:\n\n- Identificadores de conta e atendimento (como `clientUid`, `clientId` e `sessionId`)\n- Telefone verificado (quando disponível), nome informado e dados de vínculo da conta\n- Informações técnicas do dispositivo (marca, modelo e versão do Android)\n- Telemetria de sessão (rede, bateria, armazenamento e status de permissões)\n- Mensagens trocadas no chat (texto, áudio e anexos)\n- Registros operacionais de suporte, créditos e tentativas de verificação de número\n\nEssas informações são coletadas para viabilizar e proteger o funcionamento do serviço."
             )
             PolicySection(
                 title = "2. Finalidade do uso dos dados",
-                body = "Os dados coletados sao utilizados para:\n\n- Identificar o usuario durante o atendimento\n- Realizar suporte tecnico remoto\n- Registrar o historico de sessoes de atendimento\n- Diagnosticar e solucionar problemas tecnicos\n- Melhorar a qualidade e eficiencia do servico\n- Garantir a seguranca e integridade da plataforma"
+                body = "Os dados coletados são utilizados para:\n\n- Identificar e autenticar o usuário durante o atendimento\n- Realizar suporte técnico remoto com chat, áudio, compartilhamento e controle assistido\n- Registrar histórico de sessões e eventos para segurança e auditoria\n- Diagnosticar e solucionar problemas técnicos\n- Viabilizar controle de créditos, pacotes e solicitações de compra\n- Melhorar a qualidade, estabilidade e segurança do serviço"
             )
             PolicySection(
                 title = "3. Compartilhamento de dados",
-                body = "A Suporte X nao vende, aluga ou comercializa dados pessoais dos usuarios.\n\nO compartilhamento de informacoes pode ocorrer apenas quando necessario com:\n\n- Provedores de infraestrutura e hospedagem\n- Servicos de armazenamento de dados\n- Ferramentas necessarias para o funcionamento da plataforma\n\nTodos os parceiros seguem padroes de seguranca e protecao de dados compativeis com a legislacao aplicavel."
+                body = "A Suporte X não vende, aluga ou comercializa dados pessoais dos usuários.\n\nO compartilhamento de informações ocorre apenas quando necessário para operação do serviço, como com:\n\n- Provedores de infraestrutura, autenticação e banco de dados\n- Serviços de armazenamento de mídias e arquivos de suporte\n- Plataformas de comunicação e integração operacional\n\nTodos os parceiros devem seguir padrões de segurança compatíveis com a legislação aplicável."
             )
             PolicySection(
-                title = "4. Permissoes e controle do usuario",
-                body = "Alguns recursos do aplicativo podem solicitar permissoes especificas do dispositivo, como:\n\n- Compartilhamento de tela\n- Acesso remoto ao dispositivo\n- Envio de arquivos ou imagens\n\nEssas permissoes sao sempre solicitadas com autorizacao explicita do usuario e podem ser interrompidas ou revogadas a qualquer momento diretamente no aplicativo."
+                title = "4. Permissões e controle do usuário",
+                body = "Alguns recursos do aplicativo podem solicitar permissões específicas do dispositivo, como:\n\n- Compartilhamento de tela\n- Acesso remoto assistido via acessibilidade\n- Uso do microfone para áudio de atendimento\n- Envio de arquivos, imagens e áudios\n\nEssas permissões são sempre solicitadas com autorização explícita do usuário e podem ser interrompidas ou revogadas a qualquer momento."
             )
             PolicySection(
-                title = "5. Armazenamento e retencao de dados",
-                body = "Os dados coletados sao armazenados apenas pelo periodo necessario para:\n\n- Prestacao do suporte tecnico\n- Cumprimento de obrigacoes legais\n- Garantia da seguranca operacional do servico\n\nApos esse periodo, os dados podem ser excluidos ou anonimizados."
+                title = "5. Armazenamento e retenção de dados",
+                body = "Os dados são armazenados pelo período necessário para:\n\n- Prestação do suporte técnico\n- Cumprimento de obrigações legais e regulatórias\n- Segurança operacional e rastreabilidade de eventos\n\nDeterminados registros operacionais podem seguir janelas técnicas de retenção (como 15 a 30 dias), conforme a natureza do dado e a política interna de segurança."
             )
             PolicySection(
-                title = "6. Direitos do usuario",
-                body = "Em conformidade com a Lei Geral de Protecao de Dados (LGPD - Lei no 13.709/2018), o usuario possui o direito de:\n\n- Solicitar acesso aos seus dados\n- Corrigir dados incompletos ou desatualizados\n- Solicitar exclusao de dados quando aplicavel\n- Solicitar informacoes sobre o tratamento de dados\n\nAs solicitacoes podem ser feitas pelos canais de contato oficiais."
+                title = "6. Direitos do usuário",
+                body = "Em conformidade com a Lei Geral de Proteção de Dados (LGPD - Lei nº 13.709/2018), o usuário possui direito de:\n\n- Solicitar acesso aos seus dados\n- Corrigir dados incompletos ou desatualizados\n- Solicitar exclusão de dados, quando aplicável\n- Solicitar informações sobre tratamento e compartilhamento de dados\n\nAs solicitações podem ser feitas pelos canais oficiais da Suporte X."
             )
             PolicySection(
-                title = "7. Seguranca das informacoes",
-                body = "A Suporte X adota medidas tecnicas e organizacionais para proteger os dados contra acesso nao autorizado, alteracao, divulgacao ou destruicao indevida.\n\nEntre as medidas aplicadas estao:\n\n- Controle de acesso aos dados\n- Autenticacao segura\n- Registros de auditoria\n- Protecao da infraestrutura da plataforma"
+                title = "7. Segurança das informações",
+                body = "A Suporte X adota medidas técnicas e organizacionais para proteger os dados contra acesso não autorizado, alteração, divulgação ou destruição indevida.\n\nEntre as medidas aplicadas estão:\n\n- Controle de acesso por autenticação\n- Monitoramento e registros de auditoria\n- Proteção de infraestrutura e serviços de backend\n- Revisões técnicas periódicas de segurança"
             )
             PolicySection(
                 title = "8. Contato",
-                body = "Para duvidas, solicitacoes ou questoes relacionadas a privacidade e protecao de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+                body = "Para dúvidas, solicitações ou questões relacionadas à privacidade e proteção de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
             )
         }
     }
@@ -1947,7 +1955,7 @@ private fun TermsOfUseScreen(
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
         Text("Operado por Xavier Assessoria Digital", color = textMuted, fontSize = 13.sp)
         Text("CNPJ: 45.765.097/0001-61", color = textMuted, fontSize = 13.sp)
-        Text("Ultima atualizacao: 11 de marco de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 31 de março de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -1956,36 +1964,48 @@ private fun TermsOfUseScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             PolicySection(
-                title = "1. Sobre o servico",
-                body = "O Suporte X e uma plataforma desenvolvida pela Xavier Assessoria Digital que permite a realizacao de suporte tecnico remoto entre tecnicos e usuarios, por meio de comunicacao em tempo real, compartilhamento de tela e ferramentas de assistencia remota.\n\nO servico tem como objetivo facilitar o diagnostico e a resolucao de problemas tecnicos diretamente no dispositivo do usuario, mediante autorizacao expressa do mesmo."
+                title = "1. Sobre o serviço",
+                body = "O Suporte X é uma plataforma desenvolvida pela Xavier Assessoria Digital para atendimento técnico remoto. O serviço permite comunicação em tempo real entre técnico e usuário, com recursos de chat, áudio, compartilhamento de tela e assistência remota.\n\nO objetivo do serviço é facilitar diagnóstico e resolução de problemas técnicos no dispositivo do usuário, mediante autorização expressa."
             )
             PolicySection(
-                title = "2. Aceitacao dos termos",
-                body = "Ao utilizar o aplicativo Suporte X, o usuario declara que:\n\n- leu e compreendeu estes Termos de Uso\n- concorda com as condicoes aqui estabelecidas\n- autoriza o funcionamento das funcionalidades necessarias para o suporte tecnico remoto\n\nCaso o usuario nao concorde com estes termos, nao devera utilizar o aplicativo."
+                title = "2. Aceitação dos termos",
+                body = "Ao utilizar o aplicativo Suporte X, o usuário declara que:\n\n- leu e compreendeu estes Termos de Uso\n- concorda com as condições aqui estabelecidas\n- autoriza o funcionamento das funcionalidades necessárias ao suporte técnico remoto\n\nCaso não concorde com estes termos, o usuário não deverá utilizar o aplicativo."
             )
             PolicySection(
-                title = "3. Funcionamento do suporte remoto",
-                body = "Durante uma sessao de suporte, o usuario podera autorizar funcionalidades como:\n\n- compartilhamento de tela\n- envio de arquivos\n- comunicacao por chat ou audio\n- controle remoto assistido do dispositivo\n\nEssas funcionalidades so sao ativadas com autorizacao explicita do usuario e podem ser interrompidas a qualquer momento pelo proprio aplicativo."
+                title = "3. Elegibilidade e acesso ao atendimento",
+                body = "O acesso ao atendimento segue as regras operacionais da plataforma:\n\n- o primeiro atendimento pode ser disponibilizado gratuitamente\n- após o primeiro atendimento, novos atendimentos dependem de créditos disponíveis\n- sem crédito disponível, o usuário deve solicitar compra de pacote para liberar novos atendimentos"
             )
             PolicySection(
-                title = "4. Responsabilidades do usuario",
-                body = "O usuario e responsavel por:\n\n- conceder permissoes apenas quando desejar iniciar um atendimento\n- encerrar a sessao de suporte quando considerar necessario\n- nao utilizar o aplicativo para atividades ilegais ou abusivas"
+                title = "4. Funcionamento do suporte remoto",
+                body = "Durante uma sessão de suporte, o usuário poderá autorizar funcionalidades como:\n\n- compartilhamento de tela\n- envio de arquivos e imagens\n- comunicação por chat e áudio\n- controle remoto assistido do dispositivo\n\nEssas funcionalidades só são ativadas com autorização explícita e podem ser interrompidas a qualquer momento."
             )
             PolicySection(
-                title = "5. Limitacao de responsabilidade",
-                body = "A Xavier Assessoria Digital nao se responsabiliza por:\n\n- falhas causadas por terceiros\n- problemas decorrentes de uso indevido do dispositivo\n- indisponibilidade temporaria de servicos externos"
+                title = "5. Créditos, pacotes e pagamentos",
+                body = "A compra de créditos é realizada por pacotes disponibilizados na plataforma. A solicitação pode ocorrer pelos canais oficiais, incluindo WhatsApp. Algumas modalidades de pagamento podem ser exibidas no aplicativo conforme etapa de implantação operacional."
             )
             PolicySection(
-                title = "6. Modificacoes do servico",
-                body = "A Xavier Assessoria Digital pode modificar, atualizar ou interromper funcionalidades do aplicativo a qualquer momento, visando melhorias de seguranca, desempenho ou conformidade legal."
+                title = "6. Responsabilidades do usuário",
+                body = "O usuário é responsável por:\n\n- conceder permissões apenas quando desejar iniciar um atendimento\n- manter controle sobre acessos concedidos durante a sessão\n- encerrar o atendimento quando considerar necessário\n- não utilizar o aplicativo para atividades ilegais, abusivas ou fraudulentas"
             )
             PolicySection(
-                title = "7. Legislacao aplicavel",
-                body = "Este servico e regido pelas leis da Republica Federativa do Brasil, especialmente pela:\n\n- Lei Geral de Protecao de Dados (LGPD - Lei no 13.709/2018)"
+                title = "7. Limitação de responsabilidade",
+                body = "A Xavier Assessoria Digital não se responsabiliza por:\n\n- falhas causadas por terceiros, operadoras ou provedores externos\n- indisponibilidade temporária de serviços de infraestrutura\n- problemas decorrentes de uso indevido do dispositivo ou do aplicativo pelo usuário"
             )
             PolicySection(
-                title = "8. Contato",
-                body = "Empresa responsavel:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereco:\nRua dos Jequitibas, 1895w\nResidencial Paraiso\nNova Mutum - MT\nCEP: 78.454-528\n\nEmail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
+                title = "8. Privacidade e proteção de dados",
+                body = "O tratamento de dados pessoais e operacionais segue a Política de Privacidade do Suporte X e a legislação aplicável, em especial a LGPD (Lei nº 13.709/2018)."
+            )
+            PolicySection(
+                title = "9. Alterações dos termos",
+                body = "Estes Termos de Uso podem ser atualizados para refletir ajustes técnicos, operacionais, legais ou de segurança. A versão vigente estará disponível no aplicativo com a respectiva data de atualização."
+            )
+            PolicySection(
+                title = "10. Legislação aplicável e foro",
+                body = "Este serviço é regido pelas leis da República Federativa do Brasil. Fica eleito o foro da comarca competente para dirimir eventuais controvérsias, ressalvadas as hipóteses legais de competência específica."
+            )
+            PolicySection(
+                title = "11. Contato",
+                body = "Empresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895W\nResidencial Paraíso\nNova Mutum - MT\nCEP: 78.454-528\n\nE-mail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
     }
@@ -2015,13 +2035,13 @@ private fun WaitingScreen(
         Spacer(Modifier.height(80.dp))
         CircularProgressIndicator()
         Spacer(Modifier.height(16.dp))
-        Text("Acionando tecnico, aguarde...", fontSize = 18.sp)
-        Text("Tempo medio: ~2-5 min", color = textMuted)
+        Text("Acionando técnico, aguarde...", fontSize = 18.sp)
+        Text("Tempo médio: ~2-5 min", color = textMuted)
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = onCancel,
             modifier = Modifier.fillMaxWidth().height(56.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) { Text("CANCELAR SOLICITACAO", color = Color.White) }
+        ) { Text("CANCELAR SOLICITAÇÃO", color = Color.White) }
     }
 }
