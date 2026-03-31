@@ -67,6 +67,7 @@ Esta pasta documenta a estrutura de dados usada no cadastro leve de clientes, cr
 - `techId`
 - `techName`
 - `startedAt`
+- `acceptedAt` (momento em que o tecnico aceita e o atendimento entra em progresso)
 - `endedAt`
 - `status`: `queued | in_progress | completed | cancelled`
 - `isFreeFirstSupport`

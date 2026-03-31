@@ -5,6 +5,7 @@ import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.suportex.app.data.model.ClientFinancialStatus
 import com.suportex.app.data.model.ClientHomeSnapshot
@@ -25,6 +26,13 @@ class ClientSupportRepository(
     private val db: FirebaseFirestore = FirebaseDataSource.db,
     private val authRepository: AuthRepository = AuthRepository()
 ) {
+    data class SupportQueueWaitStats(
+        val queueDepth: Int,
+        val targetSampleSize: Int,
+        val usedSampleSize: Int,
+        val averageWaitMillis: Long?
+    )
+
     private val clients = db.collection("clients")
     private val clientProfiles = db.collection("client_profiles")
     private val clientAppLinks = db.collection("client_app_links")
@@ -245,6 +253,7 @@ class ClientSupportRepository(
 
             val isFreeFirstSupport = sessionSnap.getBoolean("isFreeFirstSupport") ?: false
             val billingAlreadyApplied = sessionSnap.getLong("billingAppliedAt") != null
+            val acceptedAt = sessionSnap.getLong("acceptedAt") ?: now
             val clientId = sessionSnap.getString("clientId")
 
             tx.set(
@@ -252,6 +261,7 @@ class ClientSupportRepository(
                 mapOf(
                     "sessionId" to realtimeSessionId,
                     "status" to "in_progress",
+                    "acceptedAt" to acceptedAt,
                     "techName" to techName,
                     "updatedAt" to now
                 ),
@@ -317,6 +327,54 @@ class ClientSupportRepository(
             true
         }.await()
         return true
+    }
+
+    suspend fun loadSupportQueueWaitStats(): SupportQueueWaitStats {
+        authRepository.ensureAnonAuth()
+
+        val queueDepth = runCatching {
+            supportSessions
+                .whereEqualTo("status", "queued")
+                .get()
+                .await()
+                .size()
+        }.getOrDefault(0)
+
+        val targetSampleSize = queueDepth.coerceAtLeast(1).coerceAtMost(MAX_QUEUE_WAIT_SAMPLE)
+        val candidateLimit = (targetSampleSize * 5).coerceIn(10, 120).toLong()
+
+        val candidates = runCatching {
+            supportSessions
+                .orderBy("startedAt", Query.Direction.DESCENDING)
+                .limit(candidateLimit)
+                .get()
+                .await()
+                .documents
+        }.getOrDefault(emptyList())
+
+        val waits = mutableListOf<Long>()
+        for (doc in candidates) {
+            val startedAt = doc.getLong("startedAt") ?: continue
+            val status = doc.getString("status").orEmpty()
+            if (status != "in_progress" && status != "completed") continue
+            val acceptedAt = doc.getLong("acceptedAt")
+                ?: if (status == "in_progress") doc.getLong("updatedAt") else null
+            if (acceptedAt == null) continue
+
+            val wait = acceptedAt - startedAt
+            if (wait in 0L..MAX_VALID_WAIT_MILLIS) {
+                waits.add(wait)
+            }
+            if (waits.size >= targetSampleSize) break
+        }
+
+        val averageWaitMillis = if (waits.isEmpty()) null else waits.sum() / waits.size
+        return SupportQueueWaitStats(
+            queueDepth = queueDepth,
+            targetSampleSize = targetSampleSize,
+            usedSampleSize = waits.size,
+            averageWaitMillis = averageWaitMillis
+        )
     }
 
     suspend fun cancelSupportRequest(localSupportSessionId: String?) {
@@ -1276,6 +1334,8 @@ class ClientSupportRepository(
         const val PNV_REQUEST_STATUS_MANUAL_PENDING = "manual_pending"
         const val PNV_REQUEST_STATUS_PROCESSED = "processed"
         private const val DEFAULT_PHONE_COUNTRY_CODE = "55"
+        private const val MAX_QUEUE_WAIT_SAMPLE = 30
+        private const val MAX_VALID_WAIT_MILLIS = 2 * 60 * 60 * 1000L
     }
 }
 

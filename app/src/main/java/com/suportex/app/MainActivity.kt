@@ -32,14 +32,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.suportex.app.data.ClientSupportRepository
+import com.suportex.app.data.ClientSupportRepository.SupportQueueWaitStats
 import com.suportex.app.data.FirebasePhoneIdentityProvider
 import com.suportex.app.data.PhonePnvVerificationResult
 import com.suportex.app.data.SupportBillingConfig
@@ -82,6 +85,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToLong
 
 enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION, PURCHASE_CREDITS, PAYMENT_CARD, PAYMENT_PIX }
 
@@ -154,6 +158,57 @@ class MainActivity : ComponentActivity() {
         val cb = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cb.setPrimaryClip(ClipData.newPlainText(label, text))
         Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun loadSupportQueueWaitStats(onResult: (SupportQueueWaitStats) -> Unit) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val stats = runCatching { clientSupportRepository.loadSupportQueueWaitStats() }
+                .getOrElse {
+                    SupportQueueWaitStats(
+                        queueDepth = 0,
+                        targetSampleSize = 1,
+                        usedSampleSize = 0,
+                        averageWaitMillis = null
+                    )
+                }
+            runOnUiThread { onResult(stats) }
+        }
+    }
+
+    private fun formatHomeAverageWaitLabel(stats: SupportQueueWaitStats?): String {
+        val averageWaitMillis = stats?.averageWaitMillis
+        if (averageWaitMillis == null || stats.usedSampleSize <= 0) {
+            return "Tempo médio de atendimento: sem histórico recente"
+        }
+        val durationLabel = formatDurationShort(averageWaitMillis)
+        val sampleLabel = if (stats.usedSampleSize == 1) {
+            "base: último atendimento"
+        } else {
+            "base: últimos ${stats.usedSampleSize} atendimentos"
+        }
+        return "Tempo médio de atendimento: $durationLabel ($sampleLabel)"
+    }
+
+    private fun formatWaitingAverageWaitLabel(stats: SupportQueueWaitStats?): String {
+        val averageWaitMillis = stats?.averageWaitMillis
+        if (averageWaitMillis == null || stats.usedSampleSize <= 0) {
+            return "Tempo médio: sem histórico recente"
+        }
+        val durationLabel = formatDurationShort(averageWaitMillis)
+        val sampleLabel = if (stats.usedSampleSize == 1) "base: 1 chamado" else "base: ${stats.usedSampleSize} chamados"
+        return "Tempo médio: $durationLabel ($sampleLabel)"
+    }
+
+    private fun formatDurationShort(durationMillis: Long): String {
+        val safeMillis = durationMillis.coerceAtLeast(0L)
+        val totalSeconds = (safeMillis / 1000.0).roundToLong()
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return when {
+            minutes <= 0L -> "menos de 1 min"
+            minutes < 2L && seconds > 0L -> "$minutes min ${seconds}s"
+            else -> "$minutes min"
+        }
     }
 
     private fun launchPnvVerificationFlow(
@@ -1397,6 +1452,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val appBackgroundArgb = Color(0xFFF4F6F8).toArgb()
+        window.statusBarColor = appBackgroundArgb
+        window.navigationBarColor = appBackgroundArgb
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching { clientSupportRepository.seedDefaultPackagesIfNeeded() }
         }
@@ -1455,8 +1522,11 @@ class MainActivity : ComponentActivity() {
                         )
                     )
                 }
+                var supportQueueWaitStats by remember { mutableStateOf<SupportQueueWaitStats?>(null) }
                 var selectedPackage by remember { mutableStateOf<CreditPackageRecord?>(null) }
                 var autoOpenedPurchaseClientId by rememberSaveable { mutableStateOf<String?>(null) }
+                val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
+                val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
 
                 BackHandler {
                     when (current) {
@@ -1514,6 +1584,9 @@ class MainActivity : ComponentActivity() {
                             selectedPackage = snapshot.packages.firstOrNull()
                         }
                     }
+                    loadSupportQueueWaitStats { stats ->
+                        supportQueueWaitStats = stats
+                    }
                 }
 
                 LaunchedEffect(current) {
@@ -1523,6 +1596,17 @@ class MainActivity : ComponentActivity() {
                             if (selectedPackage == null) {
                                 selectedPackage = snapshot.packages.firstOrNull()
                             }
+                        }
+                    }
+                }
+
+                LaunchedEffect(current) {
+                    if (current == Screen.HOME || current == Screen.WAITING) {
+                        while (isActive) {
+                            loadSupportQueueWaitStats { stats ->
+                                supportQueueWaitStats = stats
+                            }
+                            delay(20_000)
                         }
                     }
                 }
@@ -1609,7 +1693,8 @@ class MainActivity : ComponentActivity() {
                             onOpenHelp = { current = Screen.HELP },
                             onOpenPrivacy = { current = Screen.PRIVACY },
                             onOpenTerms = { current = Screen.TERMS },
-                            textMuted = Color(0xFF8A8A8E)
+                            textMuted = Color(0xFF8A8A8E),
+                            averageWaitLabel = homeAverageWaitLabel
                         )
 
                         Screen.HELP -> HelpScreen(
@@ -1685,7 +1770,8 @@ class MainActivity : ComponentActivity() {
                                 current = Screen.HOME
                             },
                             onAccepted = { /* nao usamos; aceitacao vem do socket */ },
-                            textMuted = Color(0xFF8A8A8E)
+                            textMuted = Color(0xFF8A8A8E),
+                            averageWaitLabel = waitingAverageWaitLabel
                         )
 
                         Screen.SESSION -> SessionScreen(
@@ -2026,7 +2112,8 @@ private fun PolicySection(title: String, body: String) {
 private fun WaitingScreen(
     onCancel: () -> Unit,
     onAccepted: () -> Unit,
-    textMuted: Color
+    textMuted: Color,
+    averageWaitLabel: String
 ) {
     Column(
         Modifier.fillMaxSize().padding(24.dp),
@@ -2036,7 +2123,7 @@ private fun WaitingScreen(
         CircularProgressIndicator()
         Spacer(Modifier.height(16.dp))
         Text("Acionando técnico, aguarde...", fontSize = 18.sp)
-        Text("Tempo médio: ~2-5 min", color = textMuted)
+        Text(averageWaitLabel, color = textMuted)
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = onCancel,

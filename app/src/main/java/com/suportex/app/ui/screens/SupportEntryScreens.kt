@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,7 +59,8 @@ fun SupportHomeScreen(
     onOpenHelp: () -> Unit,
     onOpenPrivacy: () -> Unit,
     onOpenTerms: () -> Unit,
-    textMuted: Color
+    textMuted: Color,
+    averageWaitLabel: String
 ) {
     var expandedPlans by rememberSaveable { mutableStateOf(false) }
     val clientName = homeSnapshot.client?.name
@@ -120,7 +122,9 @@ fun SupportHomeScreen(
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                tonalElevation = 1.dp
+                color = Color.White,
+                tonalElevation = 0.dp,
+                shadowElevation = 1.dp
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Row(
@@ -209,7 +213,7 @@ fun SupportHomeScreen(
 
         Spacer(Modifier.height(16.dp))
         Text(
-            "Tempo médio de atendimento: 2-5 min",
+            averageWaitLabel,
             color = textMuted,
             fontSize = 16.sp
         )
@@ -265,6 +269,9 @@ fun PurchaseCreditsScreen(
                 border = androidx.compose.foundation.BorderStroke(
                     width = if (selected) 2.dp else 1.dp,
                     color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                ),
+                colors = CardDefaults.outlinedCardColors(
+                    containerColor = Color.White
                 )
             ) {
                 Row(
@@ -294,7 +301,10 @@ fun PurchaseCreditsScreen(
             onClick = onPayPix,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp)
+                .height(52.dp),
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.White
+            )
         ) {
             Text("Pagar com PIX")
         }
@@ -304,7 +314,10 @@ fun PurchaseCreditsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF168A44))
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.White,
+                contentColor = Color(0xFF168A44)
+            )
         ) {
             Text("Comprar pelo WhatsApp")
         }
