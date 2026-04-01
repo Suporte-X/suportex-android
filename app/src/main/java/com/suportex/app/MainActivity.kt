@@ -966,6 +966,10 @@ class MainActivity : ComponentActivity() {
 
     private fun handleSessionEnded(fromCommand: Boolean = true, reason: String? = null) {
         val sid = currentSessionId
+        if (sid.isNullOrBlank()) {
+            // Evita sobrescrever a tela de feedback quando chegam eventos duplicados de encerramento.
+            return
+        }
         val origin = if (fromCommand) "tech" else "client"
         if (!fromCommand) sendCommand("end")
 

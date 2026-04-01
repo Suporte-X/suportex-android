@@ -72,7 +72,7 @@ fun SessionFeedbackScreen(
             Spacer(Modifier.height(80.dp))
 
             Text(
-                text = "Qual foi a sua satisfa\u00e7\u00e3o com o atendimento?",
+                text = "Avalie seu atendimento",
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center
             )
