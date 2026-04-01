@@ -40,7 +40,7 @@ fun SessionFeedbackScreen(
     onRate: (Int) -> Unit,
     onTimeout: () -> Unit
 ) {
-    val totalMillis = 5_000L
+    val totalMillis = 15_000L
     var remainingMillis by remember { mutableLongStateOf(totalMillis) }
     var finished by remember { mutableStateOf(false) }
 
@@ -77,48 +77,57 @@ fun SessionFeedbackScreen(
                 textAlign = TextAlign.Center
             )
 
-            Spacer(Modifier.height(36.dp))
+            Spacer(Modifier.height(28.dp))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                (1..5).forEach { score ->
-                    IconButton(
-                        onClick = {
-                            if (finished) return@IconButton
-                            finished = true
-                            onRate(score)
-                        },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                            .border(1.dp, Color(0xFFD7DBE1), CircleShape)
-                    ) {
-                        Text(
-                            text = "\u2606",
-                            color = Color(0xFF667085),
-                            fontSize = 30.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    (1..5).forEach { score ->
+                        IconButton(
+                            onClick = {
+                                if (finished) return@IconButton
+                                finished = true
+                                onRate(score)
+                            },
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .border(1.dp, Color(0xFFD7DBE1), CircleShape)
+                        ) {
+                            Text(
+                                text = "\u2606",
+                                color = Color(0xFF667085),
+                                fontSize = 30.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "0 = totalmente insatisfeito \u2022 5 = totalmente satisfeito",
+                    color = Color(0xFF667085),
+                    textAlign = TextAlign.Center,
+                    fontSize = 14.sp
+                )
             }
 
-            Spacer(Modifier.height(16.dp))
-
-            Text(
-                text = "0 = totalmente insatisfeito \u2022 5 = totalmente satisfeito",
-                color = Color(0xFF667085),
-                textAlign = TextAlign.Center,
-                fontSize = 14.sp
-            )
-
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(12.dp))
 
             LinearProgressIndicator(
                 progress = { remainingMillis.toFloat() / totalMillis.toFloat() },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(10.dp)
+                    .height(14.dp)
+                    .padding(bottom = 20.dp)
                     .clip(RoundedCornerShape(999.dp)),
                 color = Color(0xFFFFCB19),
                 trackColor = Color(0x1A000000)
