@@ -3,12 +3,14 @@ package com.suportex.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -63,69 +65,71 @@ fun SessionFeedbackScreen(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 24.dp, vertical = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.height(80.dp))
-
-            Text(
-                text = "Avalie seu atendimento",
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(Modifier.height(28.dp))
-
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
+                    .fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    (1..5).forEach { score ->
-                        IconButton(
-                            onClick = {
-                                if (finished) return@IconButton
-                                finished = true
-                                onRate(score)
-                            },
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .border(1.dp, Color(0xFFD7DBE1), CircleShape)
-                        ) {
-                            Text(
-                                text = "\u2606",
-                                color = Color(0xFF667085),
-                                fontSize = 30.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(80.dp))
 
                 Text(
-                    text = "0 = totalmente insatisfeito \u2022 5 = totalmente satisfeito",
-                    color = Color(0xFF667085),
-                    textAlign = TextAlign.Center,
-                    fontSize = 14.sp
+                    text = "Avalie seu atendimento",
+                    style = MaterialTheme.typography.headlineSmall,
+                    textAlign = TextAlign.Center
                 )
-            }
 
-            Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.weight(0.34f))
+
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        (1..5).forEach { score ->
+                            IconButton(
+                                onClick = {
+                                    if (finished) return@IconButton
+                                    finished = true
+                                    onRate(score)
+                                },
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .border(1.dp, Color(0xFFD7DBE1), CircleShape)
+                            ) {
+                                Text(
+                                    text = "\u2606",
+                                    color = Color(0xFF667085),
+                                    fontSize = 30.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Text(
+                        text = "0 = totalmente insatisfeito \u2022 5 = totalmente satisfeito",
+                        color = Color(0xFF667085),
+                        textAlign = TextAlign.Center,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Spacer(Modifier.weight(0.66f))
+            }
 
             LinearProgressIndicator(
                 progress = { remainingMillis.toFloat() / totalMillis.toFloat() },
                 modifier = Modifier
                     .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
                     .height(14.dp)
                     .padding(bottom = 20.dp)
                     .clip(RoundedCornerShape(999.dp)),
