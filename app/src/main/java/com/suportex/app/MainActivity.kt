@@ -67,11 +67,14 @@ import com.suportex.app.remote.RemoteControlService
 import com.suportex.app.ui.screens.CardPlaceholderScreen
 import com.suportex.app.ui.screens.PixPlaceholderScreen
 import com.suportex.app.ui.screens.PurchaseCreditsScreen
+import com.suportex.app.ui.screens.SessionFeedbackScreen
 import com.suportex.app.ui.screens.SessionScreen
 import com.suportex.app.ui.screens.SupportHomeScreen
 import io.socket.client.IO
 import io.socket.client.Socket
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -87,7 +90,18 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToLong
 
-enum class Screen { HOME, HELP, PRIVACY, TERMS, WAITING, SESSION, PURCHASE_CREDITS, PAYMENT_CARD, PAYMENT_PIX }
+enum class Screen {
+    HOME,
+    HELP,
+    PRIVACY,
+    TERMS,
+    WAITING,
+    SESSION,
+    SESSION_FEEDBACK,
+    PURCHASE_CREDITS,
+    PAYMENT_CARD,
+    PAYMENT_PIX
+}
 
 private const val DEFAULT_AVERAGE_WAIT_FALLBACK_MILLIS = 90_000L
 
@@ -126,6 +140,7 @@ class MainActivity : ComponentActivity() {
     private var setCallDirectionFromManager: ((CallDirection?) -> Unit)? = null
     private var setTechNameFromSocket: ((String) -> Unit)? = null
     private var setRecordingAudioFromActivity: ((Boolean) -> Unit)? = null
+    private var setEndedSessionForFeedback: ((String?) -> Unit)? = null
 
     private var currentSessionId: String? = null
     private lateinit var socket: Socket
@@ -922,6 +937,33 @@ class MainActivity : ComponentActivity() {
         runOnUiThread { setTechNameFromSocket?.invoke("T\u00e9cnico") }
     }
 
+    private fun submitCustomerSatisfaction(sessionId: String, score: Int) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isBlank()) return
+        val normalizedScore = score.coerceIn(0, 5)
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val token = authRepository.ensureAnonIdToken(forceRefresh = false)
+                if (token.isBlank()) return@launch
+                val payload = JSONObject().apply {
+                    put("customerSatisfactionScore", normalizedScore)
+                }.toString()
+                val request = Request.Builder()
+                    .url("${Conn.SERVER_BASE}/api/sessions/$normalizedSessionId/customer-feedback")
+                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull()))
+                    .header("Authorization", "Bearer $token")
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        Log.w("SXS/Main", "Falha ao enviar feedback do cliente (${response.code})")
+                    }
+                }
+            } catch (error: Exception) {
+                Log.w("SXS/Main", "Falha ao enviar satisfação do cliente", error)
+            }
+        }
+    }
+
     private fun handleSessionEnded(fromCommand: Boolean = true, reason: String? = null) {
         val sid = currentSessionId
         val origin = if (fromCommand) "tech" else "client"
@@ -971,8 +1013,9 @@ class MainActivity : ComponentActivity() {
         runOnUiThread {
             setRequestIdFromSocket?.invoke(null)
             setSessionIdFromSocket?.invoke(null)
-            setScreenFromSocket?.invoke(Screen.HOME)
-            setSystemMessageFromLauncher?.invoke(reason)
+            setEndedSessionForFeedback?.invoke(sid)
+            setScreenFromSocket?.invoke(if (sid.isNullOrBlank()) Screen.HOME else Screen.SESSION_FEEDBACK)
+            setSystemMessageFromLauncher?.invoke(null)
         }
     }
 
@@ -1506,6 +1549,7 @@ class MainActivity : ComponentActivity() {
                 var techName by remember { mutableStateOf("T\u00e9cnico") }
                 var systemMessage by remember { mutableStateOf<String?>(null) }
                 var isRecordingAudio by remember { mutableStateOf(false) }
+                var endedSessionId by remember { mutableStateOf<String?>(null) }
                 var homeSnapshot by remember {
                     mutableStateOf(
                         ClientHomeSnapshot(
@@ -1550,6 +1594,7 @@ class MainActivity : ComponentActivity() {
                             currentSessionId = null
                             current = Screen.HOME
                         }
+                        Screen.SESSION_FEEDBACK -> Unit
                         Screen.SESSION -> current = Screen.HOME
                         Screen.HOME -> finish()
                     }
@@ -1574,6 +1619,7 @@ class MainActivity : ComponentActivity() {
                     setCallDirectionFromManager = { callDirection = it }
                     setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
                     setRecordingAudioFromActivity = { isRecordingAudio = it }
+                    setEndedSessionForFeedback = { endedSessionId = it }
                     loadHomeSnapshot { snapshot ->
                         homeSnapshot = snapshot
                         if (selectedPackage == null) {
@@ -1811,9 +1857,25 @@ class MainActivity : ComponentActivity() {
                             isRecordingAudio = isRecordingAudio,
                             onEndSupport = {
                                 handleSessionEnded(fromCommand = false, reason = null)
-                                requestId = null
-                                sessionId = null
-                                systemMessage = null
+                            }
+                        )
+
+                        Screen.SESSION_FEEDBACK -> SessionFeedbackScreen(
+                            onRate = { score ->
+                                val targetSessionId = endedSessionId
+                                endedSessionId = null
+                                if (!targetSessionId.isNullOrBlank()) {
+                                    submitCustomerSatisfaction(targetSessionId, score)
+                                }
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Obrigado pelo seu feedback.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                current = Screen.HOME
+                            },
+                            onTimeout = {
+                                endedSessionId = null
                                 current = Screen.HOME
                             }
                         )
