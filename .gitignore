@@ -10,6 +10,8 @@ keystore.properties
 # Tests/outputs
 **/captures/
 **/outputs/
+monitoring/
+node_modules/
 
 # OS
 .DS_Store
