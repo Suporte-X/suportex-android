@@ -24,6 +24,29 @@ Garantir que o projeto possa ser retomado em outra maquina sem copia manual de H
 - Qualquer `.env*` local e credencial privada
 - Conteudo de `.codex-memory/` (memoria local do Codex)
 
+## Backup no Google Drive (automatico)
+
+Pasta usada:
+
+- `I:\Meu Drive\Suporte X\Backup do Projeto`
+
+Scripts:
+
+- `tools/backup-sensitive-to-drive.ps1`: copia segredos e memoria para `latest/` e cria snapshot com data/hora.
+- `tools/register-backup-task.ps1`: agenda o backup no Windows (padrao: a cada 6 horas).
+
+Execucao manual imediata:
+
+```powershell
+& .\tools\backup-sensitive-to-drive.ps1
+```
+
+Agendar automatico:
+
+```powershell
+& .\tools\register-backup-task.ps1
+```
+
 ## Bootstrap em maquina nova
 
 No PowerShell:
