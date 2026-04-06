@@ -15,7 +15,8 @@ import {
   runTransaction,
   setDoc,
   Timestamp,
-  updateDoc
+  updateDoc,
+  where
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const COLLECTIONS = {
@@ -107,7 +108,11 @@ function bindActions() {
       alert("Digite um telefone valido.");
       return;
     }
-    const clientId = clientDocIdFromPhone(normalized);
+    const clientId = await resolveClientIdByPhone(normalized);
+    if (!clientId) {
+      alert("Cliente nao encontrado.");
+      return;
+    }
     await loadClientProfile(clientId);
   });
 }
@@ -425,6 +430,51 @@ async function resolveClientUidByClientId(clientId) {
   return link?.clientUid || null;
 }
 
+async function resolveClientIdByPhone(phone) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return null;
+  const candidateIds = new Set();
+  const directId = clientDocIdFromPhone(normalizedPhone);
+  const directSnap = await getDoc(doc(db, COLLECTIONS.clients, directId));
+  if (directSnap.exists()) {
+    candidateIds.add(directSnap.id);
+  }
+
+  const verifiedMatches = await getDocs(
+    query(collection(db, COLLECTIONS.clientVerifications), where("verifiedPhone", "==", normalizedPhone))
+  );
+  verifiedMatches.docs.forEach((item) => {
+    const clientId = item.data().clientId;
+    if (clientId) candidateIds.add(clientId);
+  });
+
+  const primaryMatches = await getDocs(
+    query(collection(db, COLLECTIONS.clientVerifications), where("primaryPhone", "==", normalizedPhone))
+  );
+  primaryMatches.docs.forEach((item) => {
+    const clientId = item.data().clientId;
+    if (clientId) candidateIds.add(clientId);
+  });
+
+  let bestClient = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidateId of candidateIds) {
+    const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, candidateId));
+    if (!clientSnap.exists()) continue;
+    const client = { id: clientSnap.id, ...clientSnap.data() };
+    const score = (client.freeFirstSupportUsed ? 1000 : 0)
+      + (Number(client.supportsUsed ?? 0) * 100)
+      + (client.profileCompleted ? 10 : 0)
+      + Math.floor(Number(client.updatedAt ?? 0) / 1000);
+    if (score > bestScore) {
+      bestScore = score;
+      bestClient = client;
+    }
+  }
+
+  return bestClient?.id || null;
+}
+
 async function requestManualVerification(client) {
   const now = Date.now();
   const pnvRequestExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.pnvRequests);
@@ -512,7 +562,7 @@ async function markVerificationMismatch(client, reason) {
 
 async function registerOrUpdateClient(payload) {
   const now = Date.now();
-  const clientId = clientDocIdFromPhone(payload.phone);
+  const clientId = await resolveClientIdByPhone(payload.phone) || clientDocIdFromPhone(payload.phone);
   const clientRef = doc(db, COLLECTIONS.clients, clientId);
   const profileRef = doc(db, COLLECTIONS.clientProfiles, clientId);
 

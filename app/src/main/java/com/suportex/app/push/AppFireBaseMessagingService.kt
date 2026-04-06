@@ -30,7 +30,8 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
                 runCatching {
                     clientSupportRepository.loadHomeSnapshot(
                         clientUid = uid,
-                        rawPhone = null
+                        rawPhone = null,
+                        deviceAnchor = null
                     )
                 }.onFailure { err ->
                     Log.e("SXS/FCM", "Falha ao processar atualização de verificação", err)

@@ -62,12 +62,17 @@ class ClientSupportRepository(
 
     suspend fun loadHomeSnapshot(
         clientUid: String?,
-        rawPhone: String?
+        rawPhone: String?,
+        deviceAnchor: String?
     ): ClientHomeSnapshot {
         authRepository.ensureAnonAuth()
         val packages = listCreditPackages()
         val normalizedPhone = normalizePhone(rawPhone)
-        val resolvedClient = resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+        val resolvedClient = resolveClientForApp(
+            clientUid = clientUid,
+            normalizedPhone = normalizedPhone,
+            deviceAnchor = deviceAnchor
+        )
         val client = resolvedClient?.client
         val meta = if (client != null) {
             runCatching {
@@ -100,12 +105,17 @@ class ClientSupportRepository(
 
     suspend fun evaluateSupportAccess(
         clientUid: String?,
-        fallbackVerifiedPhone: String?
+        fallbackVerifiedPhone: String?,
+        deviceAnchor: String?
     ): SupportAccessDecision {
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(fallbackVerifiedPhone)
         val resolvedClient = runCatching {
-            resolveClientForApp(clientUid = clientUid, normalizedPhone = normalizedPhone)
+            resolveClientForApp(
+                clientUid = clientUid,
+                normalizedPhone = normalizedPhone,
+                deviceAnchor = deviceAnchor
+            )
         }.getOrNull()
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
         var client = resolvedClient?.client
@@ -117,7 +127,8 @@ class ClientSupportRepository(
                     normalizedPhone != null -> ensureClientByPhoneWithUid(
                         normalizedPhone = normalizedPhone,
                         clientUid = sanitizedUid,
-                        displayName = null
+                        displayName = null,
+                        deviceAnchor = deviceAnchor
                     )
                     sanitizedUid != null -> ensureClientByUid(
                         clientUid = sanitizedUid,
@@ -128,11 +139,12 @@ class ClientSupportRepository(
             }.getOrNull()
             client = ensured?.client
             ensuredAsNewClient = ensured?.isNewClient == true
-            if (sanitizedUid != null && client != null) {
+            if ((sanitizedUid != null || !deviceAnchor.isNullOrBlank()) && client != null) {
                 upsertClientAppLink(
                     clientUid = sanitizedUid,
                     clientId = client.id,
-                    phone = normalizedPhone ?: client.phone.takeIf { it.isNotBlank() }
+                    phone = normalizedPhone ?: client.phone.takeIf { it.isNotBlank() },
+                    deviceAnchor = deviceAnchor
                 )
             }
         }
@@ -202,6 +214,7 @@ class ClientSupportRepository(
         startContext: SupportStartContext,
         clientName: String?,
         clientUid: String?,
+        deviceAnchor: String?,
         deviceBrand: String?,
         deviceModel: String?,
         androidVersion: String?
@@ -214,6 +227,7 @@ class ClientSupportRepository(
             "clientPhone" to startContext.phone,
             "clientName" to clientName,
             "clientUid" to clientUid,
+            "deviceAnchor" to deviceAnchor,
             "techId" to null,
             "techName" to null,
             "startedAt" to now,
@@ -228,6 +242,7 @@ class ClientSupportRepository(
             "reportId" to null,
             "source" to "android_app",
             "device" to mapOf(
+                "anchor" to deviceAnchor,
                 "brand" to deviceBrand,
                 "model" to deviceModel,
                 "androidVersion" to androidVersion
@@ -427,7 +442,8 @@ class ClientSupportRepository(
         fallbackPhone: String?,
         status: String = PNV_REQUEST_STATUS_PENDING,
         manualFallback: Boolean = false,
-        reason: String? = null
+        reason: String? = null,
+        deviceAnchor: String? = null
     ) {
         authRepository.ensureAnonAuth()
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
@@ -439,6 +455,7 @@ class ClientSupportRepository(
         val requestPayload = mutableMapOf<String, Any?>(
             "clientUid" to sanitizedUid,
             "clientId" to sanitizedClientId,
+            "deviceAnchor" to deviceAnchor,
             "phone" to normalizedPhone,
             "status" to status,
             "manualFallback" to manualFallback,
@@ -450,11 +467,12 @@ class ClientSupportRepository(
         )
         pnvRequests.document().set(requestPayload.filterValues { it != null }).await()
 
-        if (sanitizedUid != null && sanitizedClientId != null) {
+        if ((sanitizedUid != null || !deviceAnchor.isNullOrBlank()) && sanitizedClientId != null) {
             upsertClientAppLink(
                 clientUid = sanitizedUid,
                 clientId = sanitizedClientId,
-                phone = normalizedPhone
+                phone = normalizedPhone,
+                deviceAnchor = deviceAnchor
             )
         }
 
@@ -486,7 +504,8 @@ class ClientSupportRepository(
         clientUid: String?,
         verifiedPhone: String,
         token: String?,
-        localSupportSessionId: String?
+        localSupportSessionId: String?,
+        deviceAnchor: String?
     ): ClientRecord? {
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(verifiedPhone) ?: return null
@@ -496,14 +515,16 @@ class ClientSupportRepository(
         val ensured = ensureClientByPhoneWithUid(
             normalizedPhone = normalizedPhone,
             clientUid = sanitizedUid,
-            displayName = null
+            displayName = null,
+            deviceAnchor = deviceAnchor
         )
 
-        if (sanitizedUid != null) {
+        if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
             upsertClientAppLink(
                 clientUid = sanitizedUid,
                 clientId = ensured.client.id,
-                phone = normalizedPhone
+                phone = normalizedPhone,
+                deviceAnchor = deviceAnchor
             )
         }
 
@@ -524,6 +545,7 @@ class ClientSupportRepository(
             mapOf(
                 "clientUid" to sanitizedUid,
                 "clientId" to ensured.client.id,
+                "deviceAnchor" to deviceAnchor,
                 "phone" to normalizedPhone,
                 "status" to PNV_REQUEST_STATUS_PROCESSED,
                 "manualFallback" to false,
@@ -615,13 +637,24 @@ class ClientSupportRepository(
             ),
             SetOptions.merge()
         ).await()
-        clientVerifications.document(ensured.client.id).set(
-            mapOf(
-                "clientId" to ensured.client.id,
-                "primaryPhone" to normalizedPhone,
-                "status" to VERIFICATION_STATUS_PENDING,
-                "updatedAt" to now
-            ),
+        val verificationRef = clientVerifications.document(ensured.client.id)
+        val existingVerification = runCatching { verificationRef.get().await() }.getOrNull()
+        val existingStatus = existingVerification?.getString("status")
+        val payload = mutableMapOf<String, Any?>(
+            "clientId" to ensured.client.id,
+            "primaryPhone" to normalizedPhone,
+            "updatedAt" to now
+        )
+        if (existingStatus.isNullOrBlank()) {
+            payload["status"] = VERIFICATION_STATUS_PENDING
+        } else {
+            payload["status"] = existingStatus
+            payload["verifiedPhone"] = existingVerification?.getString("verifiedPhone")
+            payload["mismatchReason"] = existingVerification?.getString("mismatchReason")
+            payload["lastVerificationAt"] = existingVerification?.getLong("lastVerificationAt")
+        }
+        verificationRef.set(
+            payload.filterValues { it != null },
             SetOptions.merge()
         ).await()
         return clients.document(ensured.client.id).get().await().toClientRecord()
@@ -837,6 +870,14 @@ class ClientSupportRepository(
         normalizedPhone: String,
         displayName: String?
     ): EnsureClientResult {
+        val resolvedExisting = resolveClientByVerificationPhone(normalizedPhone)
+        if (resolvedExisting != null) {
+            return ensureClientRecord(
+                clientId = resolvedExisting.id,
+                normalizedPhone = normalizedPhone,
+                displayName = displayName
+            )
+        }
         val clientId = clientDocIdFromPhone(normalizedPhone)
         return ensureClientRecord(
             clientId = clientId,
@@ -848,10 +889,27 @@ class ClientSupportRepository(
     private suspend fun ensureClientByPhoneWithUid(
         normalizedPhone: String,
         clientUid: String?,
-        displayName: String?
+        displayName: String?,
+        deviceAnchor: String?
     ): EnsureClientResult {
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
         if (sanitizedUid == null) {
+            val clientByVerificationPhone = resolveClientByVerificationPhone(normalizedPhone)
+            if (clientByVerificationPhone != null) {
+                return ensureClientRecord(
+                    clientId = clientByVerificationPhone.id,
+                    normalizedPhone = normalizedPhone,
+                    displayName = displayName
+                )
+            }
+            val clientByDeviceAnchor = resolveLinkedClientByDeviceAnchor(deviceAnchor)
+            if (clientByDeviceAnchor != null) {
+                return ensureClientRecord(
+                    clientId = clientByDeviceAnchor.id,
+                    normalizedPhone = normalizedPhone,
+                    displayName = displayName
+                )
+            }
             return ensureClientByPhone(
                 normalizedPhone = normalizedPhone,
                 displayName = displayName
@@ -865,30 +923,18 @@ class ClientSupportRepository(
                 .getString("clientId")
                 ?.takeIf { it.isNotBlank() }
         }.getOrNull()
+        val deviceLinkedClientId = resolveLinkedClientByDeviceAnchor(deviceAnchor)?.id
+        val verificationLinkedClientId = resolveClientByVerificationPhone(normalizedPhone)?.id
 
         val candidateIds = listOfNotNull(
             linkedClientId,
+            deviceLinkedClientId,
+            verificationLinkedClientId,
             clientDocIdFromUid(sanitizedUid),
             clientDocIdFromPhone(normalizedPhone)
         ).distinct()
 
-        var bestClientId: String? = null
-        var bestScore = Int.MIN_VALUE
-        for (candidateId in candidateIds) {
-            val existing = runCatching { clients.document(candidateId).get().await() }.getOrNull()
-            if (existing?.exists() == true) {
-                val supportsUsed = (existing.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
-                val freeFirstSupportUsed = existing.getBoolean("freeFirstSupportUsed") ?: false
-                val profileCompleted = existing.getBoolean("profileCompleted") ?: false
-                val score = (if (freeFirstSupportUsed) 1000 else 0) +
-                    (supportsUsed * 100) +
-                    (if (profileCompleted) 10 else 0)
-                if (score > bestScore) {
-                    bestScore = score
-                    bestClientId = candidateId
-                }
-            }
-        }
+        val bestClientId = resolveBestClientByIds(candidateIds)?.id
         if (!bestClientId.isNullOrBlank()) {
             return ensureClientRecord(
                 clientId = bestClientId,
@@ -997,7 +1043,8 @@ class ClientSupportRepository(
 
     private suspend fun resolveClientForApp(
         clientUid: String?,
-        normalizedPhone: String?
+        normalizedPhone: String?,
+        deviceAnchor: String?
     ): ResolvedClientResult? {
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
 
@@ -1016,7 +1063,8 @@ class ClientSupportRepository(
                     upsertClientAppLink(
                         clientUid = sanitizedUid,
                         clientId = requestedClient.id,
-                        phone = requestedClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone
+                        phone = requestedClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone,
+                        deviceAnchor = deviceAnchor
                     )
                     return ResolvedClientResult(client = requestedClient)
                 }
@@ -1030,20 +1078,47 @@ class ClientSupportRepository(
                 upsertClientAppLink(
                     clientUid = sanitizedUid,
                     clientId = provisionalClient.id,
-                    phone = provisionalClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone
+                    phone = provisionalClient.phone.takeIf { it.isNotBlank() } ?: normalizedPhone,
+                    deviceAnchor = deviceAnchor
                 )
                 return ResolvedClientResult(client = provisionalClient)
             }
         }
 
+        val linkedByDevice = resolveLinkedClientByDeviceAnchor(deviceAnchor)
+        if (linkedByDevice != null) {
+            if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
+                upsertClientAppLink(
+                    clientUid = sanitizedUid,
+                    clientId = linkedByDevice.id,
+                    phone = linkedByDevice.phone.takeIf { it.isNotBlank() } ?: normalizedPhone,
+                    deviceAnchor = deviceAnchor
+                )
+            }
+            return ResolvedClientResult(client = linkedByDevice)
+        }
+
         if (normalizedPhone != null) {
+            val byVerificationPhone = resolveClientByVerificationPhone(normalizedPhone)
+            if (byVerificationPhone != null) {
+                if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
+                    upsertClientAppLink(
+                        clientUid = sanitizedUid,
+                        clientId = byVerificationPhone.id,
+                        phone = normalizedPhone,
+                        deviceAnchor = deviceAnchor
+                    )
+                }
+                return ResolvedClientResult(client = byVerificationPhone)
+            }
             val byPhone = clients.document(clientDocIdFromPhone(normalizedPhone)).get().await().toClientRecord()
             if (byPhone != null) {
-                if (sanitizedUid != null) {
+                if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
                     upsertClientAppLink(
                         clientUid = sanitizedUid,
                         clientId = byPhone.id,
-                        phone = normalizedPhone
+                        phone = normalizedPhone,
+                        deviceAnchor = deviceAnchor
                     )
                 }
                 return ResolvedClientResult(client = byPhone)
@@ -1060,23 +1135,89 @@ class ClientSupportRepository(
         return runCatching { clients.document(clientId).get().await().toClientRecord() }.getOrNull()
     }
 
+    private suspend fun resolveLinkedClientByDeviceAnchor(deviceAnchor: String?): ClientRecord? {
+        val normalizedAnchor = deviceAnchor?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val linkSnapshot = runCatching {
+            clientAppLinks.document(linkDocIdFromDeviceAnchor(normalizedAnchor)).get().await()
+        }.getOrNull() ?: return null
+        val clientId = linkSnapshot.getString("clientId")?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching { clients.document(clientId).get().await().toClientRecord() }.getOrNull()
+    }
+
+    private suspend fun resolveClientByVerificationPhone(normalizedPhone: String): ClientRecord? {
+        val candidateIds = mutableListOf<String>()
+        val verifiedMatches = runCatching {
+            clientVerifications.whereEqualTo("verifiedPhone", normalizedPhone).get().await()
+        }.getOrNull()
+        if (verifiedMatches != null) {
+            candidateIds += verifiedMatches.documents.mapNotNull { it.getString("clientId") }
+        }
+        val primaryMatches = runCatching {
+            clientVerifications.whereEqualTo("primaryPhone", normalizedPhone).get().await()
+        }.getOrNull()
+        if (primaryMatches != null) {
+            candidateIds += primaryMatches.documents.mapNotNull { it.getString("clientId") }
+        }
+        return resolveBestClientByIds(candidateIds.distinct())
+    }
+
+    private suspend fun resolveBestClientByIds(candidateIds: List<String>): ClientRecord? {
+        var bestClient: ClientRecord? = null
+        var bestScore = Int.MIN_VALUE
+        for (candidateId in candidateIds) {
+            val existing = runCatching { clients.document(candidateId).get().await() }.getOrNull()
+            if (existing?.exists() != true) continue
+            val current = existing.toClientRecord() ?: continue
+            val score = scoreClientCandidate(existing)
+            if (score > bestScore) {
+                bestScore = score
+                bestClient = current
+            }
+        }
+        return bestClient
+    }
+
+    private fun scoreClientCandidate(snapshot: DocumentSnapshot): Int {
+        val supportsUsed = (snapshot.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
+        val freeFirstSupportUsed = snapshot.getBoolean("freeFirstSupportUsed") ?: false
+        val profileCompleted = snapshot.getBoolean("profileCompleted") ?: false
+        val updatedAt = (snapshot.getLong("updatedAt") ?: 0L).coerceAtLeast(0L)
+        return (if (freeFirstSupportUsed) 1000 else 0) +
+            (supportsUsed * 100) +
+            (if (profileCompleted) 10 else 0) +
+            (updatedAt / 1000L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
     private suspend fun upsertClientAppLink(
-        clientUid: String,
+        clientUid: String?,
         clientId: String,
-        phone: String?
+        phone: String?,
+        deviceAnchor: String?
     ) {
         val now = System.currentTimeMillis()
-        runCatching {
-            clientAppLinks.document(clientUid).set(
-                mapOf(
-                    "clientUid" to clientUid,
-                    "clientId" to clientId,
-                    "phone" to phone,
-                    "updatedAt" to now,
-                    "createdAt" to now
-                ),
-                SetOptions.merge()
-            ).await()
+        val payload = mapOf(
+            "clientUid" to clientUid,
+            "clientId" to clientId,
+            "phone" to phone,
+            "deviceAnchor" to deviceAnchor,
+            "updatedAt" to now,
+            "createdAt" to now
+        ).filterValues { it != null }
+        clientUid?.takeIf { it.isNotBlank() }?.let { uid ->
+            runCatching {
+                clientAppLinks.document(uid).set(
+                    payload,
+                    SetOptions.merge()
+                ).await()
+            }
+        }
+        deviceAnchor?.takeIf { it.isNotBlank() }?.let { anchor ->
+            runCatching {
+                clientAppLinks.document(linkDocIdFromDeviceAnchor(anchor)).set(
+                    payload + mapOf("linkType" to "device"),
+                    SetOptions.merge()
+                ).await()
+            }
         }
     }
 
@@ -1221,6 +1362,9 @@ class ClientSupportRepository(
 
     private fun clientDocIdFromUid(clientUid: String): String =
         "uid_${clientUid.filter { it.isLetterOrDigit() }}"
+
+    private fun linkDocIdFromDeviceAnchor(deviceAnchor: String): String =
+        "device_${deviceAnchor.filter { it.isLetterOrDigit() }}"
 
     private fun deriveClientStatus(credits: Int, freeFirstSupportUsed: Boolean): String {
         return when {

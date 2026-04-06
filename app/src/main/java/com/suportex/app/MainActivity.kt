@@ -82,6 +82,7 @@ import android.media.MediaRecorder
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -170,6 +171,18 @@ class MainActivity : ComponentActivity() {
         p.edit().putString("device_id", gen).apply()
         return gen
     }
+
+    private fun deviceAnchor(): String {
+        val androidId = runCatching {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && it != "9774d56d682e549c" }
+        val raw = androidId ?: deviceId()
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray())
+        return digest.joinToString("") { "%02x".format(it) }
+    }
     @Suppress("unused")
     private fun copyToClipboard(label: String, text: String) {
         val cb = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
@@ -237,7 +250,8 @@ class MainActivity : ComponentActivity() {
                             clientUid = clientUid,
                             verifiedPhone = cachedPhone,
                             token = null,
-                            localSupportSessionId = localSupportSessionId
+                            localSupportSessionId = localSupportSessionId,
+                            deviceAnchor = deviceAnchor()
                         )
                     }
                 }
@@ -258,7 +272,8 @@ class MainActivity : ComponentActivity() {
                                 fallbackPhone = startContext.phone,
                                 status = "pending",
                                 manualFallback = false,
-                                reason = supportInfo?.failureReason ?: "pnv_unsupported"
+                                reason = supportInfo?.failureReason ?: "pnv_unsupported",
+                                deviceAnchor = deviceAnchor()
                             )
                         }
                     }
@@ -276,7 +291,8 @@ class MainActivity : ComponentActivity() {
                                     clientUid = clientUid,
                                     verifiedPhone = verificationResult.phoneNumber,
                                     token = verificationResult.token,
-                                    localSupportSessionId = localSupportSessionId
+                                    localSupportSessionId = localSupportSessionId,
+                                    deviceAnchor = deviceAnchor()
                                 )
                             }
                         }
@@ -286,18 +302,19 @@ class MainActivity : ComponentActivity() {
                     is PhonePnvVerificationResult.Failure -> {
                         lifecycleScope.launch(Dispatchers.IO) {
                             runCatching {
-                                clientSupportRepository.registerPnvAttempt(
-                                    clientUid = clientUid,
-                                    clientId = startContext.clientId,
-                                    fallbackPhone = startContext.phone,
-                                    status = "pending",
-                                    manualFallback = false,
-                                    reason = if (verificationResult.userCancelled) {
-                                        "pnv_user_cancelled"
-                                    } else {
-                                        verificationResult.reason
-                                    }
-                                )
+                            clientSupportRepository.registerPnvAttempt(
+                                clientUid = clientUid,
+                                clientId = startContext.clientId,
+                                fallbackPhone = startContext.phone,
+                                status = "pending",
+                                manualFallback = false,
+                                reason = if (verificationResult.userCancelled) {
+                                    "pnv_user_cancelled"
+                                } else {
+                                    verificationResult.reason
+                                },
+                                deviceAnchor = deviceAnchor()
+                            )
                             }
                         }
                         setSystemMessageFromLauncher?.invoke(
@@ -1187,7 +1204,8 @@ class MainActivity : ComponentActivity() {
                 clientSupportRepository.seedDefaultPackagesIfNeeded()
                 clientSupportRepository.loadHomeSnapshot(
                     clientUid = clientUid,
-                    rawPhone = firebasePhone
+                    rawPhone = firebasePhone,
+                    deviceAnchor = deviceAnchor()
                 )
             }.getOrElse {
                 ClientHomeSnapshot(
@@ -1198,6 +1216,12 @@ class MainActivity : ComponentActivity() {
                     verification = null,
                     packages = SupportBillingConfig.defaultCreditPackages
                 )
+            }
+            val verifiedPhone = snapshot.verification?.verifiedPhone
+                ?.trim()
+                ?.takeIf { it.isNotBlank() && snapshot.verification.status == "verified" }
+            if (!verifiedPhone.isNullOrBlank()) {
+                runCatching { phoneIdentityProvider.saveVerifiedPhoneNumber(verifiedPhone) }
             }
             runOnUiThread { onResult(snapshot) }
         }
@@ -1211,7 +1235,8 @@ class MainActivity : ComponentActivity() {
                 clientSupportRepository.seedDefaultPackagesIfNeeded()
                 clientSupportRepository.evaluateSupportAccess(
                     clientUid = clientUid,
-                    fallbackVerifiedPhone = firebasePhone
+                    fallbackVerifiedPhone = firebasePhone,
+                    deviceAnchor = deviceAnchor()
                 )
             }.getOrElse {
                 Log.e("SXS/Main", "Falha ao verificar acesso de suporte", it)
@@ -1233,6 +1258,7 @@ class MainActivity : ComponentActivity() {
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
             val verifiedPhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
             val effectivePhone = verifiedPhone ?: startContext.phone
+            val currentDeviceAnchor = deviceAnchor()
             if (uid.isNullOrBlank()) {
                 Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
                 runOnUiThread {
@@ -1247,6 +1273,7 @@ class MainActivity : ComponentActivity() {
                     startContext = startContext.copy(phone = effectivePhone),
                     clientName = clientName,
                     clientUid = uid,
+                    deviceAnchor = currentDeviceAnchor,
                     deviceBrand = Build.BRAND,
                     deviceModel = Build.MODEL,
                     androidVersion = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
@@ -1266,6 +1293,7 @@ class MainActivity : ComponentActivity() {
                 })
                 put("clientUid", uid)
                 put("uid", uid)
+                put("deviceAnchor", currentDeviceAnchor)
                 put("supportProfile", JSONObject().apply {
                     put("isNewClient", startContext.isNewClient)
                     put("isFreeFirstSupport", startContext.isFreeFirstSupport)
@@ -1281,12 +1309,13 @@ class MainActivity : ComponentActivity() {
 
             if (!verifiedPhone.isNullOrBlank()) {
                 runCatching {
-                    clientSupportRepository.registerPnvSuccess(
-                        clientUid = uid,
-                        verifiedPhone = verifiedPhone,
-                        token = null,
-                        localSupportSessionId = pendingSupportSessionId
-                    )
+                        clientSupportRepository.registerPnvSuccess(
+                            clientUid = uid,
+                            verifiedPhone = verifiedPhone,
+                            token = null,
+                            localSupportSessionId = pendingSupportSessionId,
+                            deviceAnchor = currentDeviceAnchor
+                        )
                 }
             } else {
                 runOnUiThread {
