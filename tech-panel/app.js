@@ -40,7 +40,15 @@ const RETENTION_DAYS = {
 const state = {
   selectedClientId: null,
   selectedPhone: null,
-  packages: []
+  packages: [],
+  draftMode: "empty",
+  clientOriginal: null,
+  clientDraft: null,
+  profileNotice: null,
+  profileContext: null,
+  sections: {
+    verification: false
+  }
 };
 
 const firebaseConfig = window.SUPORTEX_FIREBASE_CONFIG;
@@ -53,23 +61,24 @@ const queueList = document.querySelector("#queue-list");
 const historyList = document.querySelector("#history-list");
 const ordersList = document.querySelector("#orders-list");
 const profileContainer = document.querySelector("#client-profile");
-const quickRegisterForm = document.querySelector("#quick-register-form");
 const refreshAllBtn = document.querySelector("#refresh-all");
 const searchClientBtn = document.querySelector("#search-client-btn");
 const searchPhoneInput = document.querySelector("#search-phone");
+const newClientBtn = document.querySelector("#new-client-btn");
 
 setup();
 
 async function setup() {
   bindActions();
+  renderEmptyProfile();
   try {
     await signInAnonymously(auth);
   } catch (err) {
     console.error(err);
-    authStatus.textContent = "Falha de autenticacao";
+    authStatus.textContent = "Falha de autenticação";
   }
   onAuthStateChanged(auth, async (user) => {
-    authStatus.textContent = user ? `Conectado: ${user.uid.slice(0, 8)}...` : "Sem autenticacao";
+    authStatus.textContent = user ? `Conectado: ${user.uid.slice(0, 8)}...` : "Sem autenticação";
     await loadAll();
   });
 }
@@ -79,42 +88,39 @@ function bindActions() {
     loadAll();
   });
 
-  quickRegisterForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = {
-      name: document.querySelector("#reg-name").value.trim(),
-      phone: normalizePhone(document.querySelector("#reg-phone").value),
-      email: document.querySelector("#reg-email").value.trim() || null,
-      notes: document.querySelector("#reg-notes").value.trim() || null
-    };
-    if (!payload.name || !payload.phone) {
-      alert("Nome e telefone sao obrigatorios.");
-      return;
-    }
-    try {
-      const clientId = await registerOrUpdateClient(payload);
-      quickRegisterForm.reset();
-      await loadClientProfile(clientId);
-      await loadQueue();
-    } catch (err) {
-      console.error(err);
-      alert("Nao foi possivel cadastrar o cliente.");
-    }
+  searchClientBtn.addEventListener("click", async () => {
+    await openClientFromSearch();
   });
 
-  searchClientBtn.addEventListener("click", async () => {
-    const normalized = normalizePhone(searchPhoneInput.value);
-    if (!normalized) {
-      alert("Digite um telefone valido.");
-      return;
-    }
-    const clientId = await resolveClientIdByPhone(normalized);
-    if (!clientId) {
-      alert("Cliente nao encontrado.");
-      return;
-    }
-    await loadClientProfile(clientId);
+  newClientBtn.addEventListener("click", async () => {
+    beginNewClientDraft(searchPhoneInput.value);
+    setProfileNotice("info", "Preencha os dados para criar uma nova ficha.");
+    renderProfileFromState();
+    await loadOrders();
   });
+
+  searchPhoneInput.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    await openClientFromSearch();
+  });
+}
+
+async function openClientFromSearch() {
+  const normalized = normalizePhone(searchPhoneInput.value);
+  if (!normalized) {
+    alert("Digite um telefone válido.");
+    return;
+  }
+  const clientId = await resolveClientIdByPhone(normalized);
+  if (!clientId) {
+    beginNewClientDraft(normalized);
+    setProfileNotice("info", "Cliente não encontrado. Cadastro pronto para preenchimento.");
+    renderProfileFromState();
+    await loadOrders();
+    return;
+  }
+  await loadClientProfile(clientId);
 }
 
 async function loadAll() {
@@ -123,9 +129,18 @@ async function loadAll() {
     loadQueue(),
     loadOrders()
   ]);
+
   if (state.selectedClientId) {
     await loadClientProfile(state.selectedClientId);
+    return;
   }
+
+  if (state.draftMode === "new") {
+    renderProfileFromState();
+    return;
+  }
+
+  renderEmptyProfile();
 }
 
 async function loadPackages() {
@@ -135,7 +150,6 @@ async function loadPackages() {
     .filter((pkg) => pkg.active !== false)
     .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
 }
-
 async function loadQueue() {
   queueList.innerHTML = "<small>Carregando...</small>";
   const snap = await getDocs(collection(db, COLLECTIONS.supportSessions));
@@ -162,7 +176,7 @@ async function loadQueue() {
   );
 
   if (!rows.length) {
-    queueList.innerHTML = "<small>Sem solicitacoes pendentes.</small>";
+    queueList.innerHTML = "<small>Sem solicitações pendentes.</small>";
     return;
   }
 
@@ -176,18 +190,25 @@ async function loadQueue() {
     const card = document.createElement("article");
     card.className = `queue-item ${isNewClient ? "is-new" : ""} ${noCredit ? "no-credit" : ""}`;
     card.innerHTML = `
-      <strong>${client?.name || "Cliente nao cadastrado"}</strong>
-      <div>Telefone: ${session.clientPhone || client?.phone || "-"}</div>
-      <div>Status da sessao: ${session.status || "-"}</div>
-      <div class="queue-meta">
-        ${isNewClient ? '<span class="badge warn">Primeiro atendimento gratis</span>' : ""}
-        ${noCredit ? '<span class="badge danger">Sem credito</span>' : ""}
-        ${!isNewClient && !noCredit ? '<span class="badge ok">Com credito</span>' : ""}
-        <span class="badge ${verificationBadgeClass(verificationStatus)}">${verificationStatusLabel(verificationStatus)}</span>
+      <div class="queue-item-top">
+        <div>
+          <strong>${escapeHtml(client?.name || "Cliente não cadastrado")}</strong>
+          <div class="queue-phone">${escapeHtml(session.clientPhone || client?.phone || "-")}</div>
+        </div>
+        <span class="badge ${session.status === "in_progress" ? "ok" : "warn"}">
+          ${escapeHtml(sessionStatusLabel(session.status))}
+        </span>
       </div>
-      <div class="profile-actions">
-        <button type="button" data-open-client="${client?.id || ""}" data-phone="${session.clientPhone || ""}">
-          Abrir ficha
+      <div class="queue-meta">
+        ${isNewClient ? '<span class="badge warn">Primeiro atendimento</span>' : ""}
+        ${noCredit ? '<span class="badge danger">Sem crédito</span>' : ""}
+        ${!isNewClient && !noCredit ? '<span class="badge ok">Com crédito</span>' : ""}
+        <span class="badge ${verificationBadgeClass(verificationStatus)}">${escapeHtml(verificationStatusLabel(verificationStatus))}</span>
+      </div>
+      <div class="queue-note">Abra a ficha para atualizar dados, validar atendimento e seguir com a ação necessária.</div>
+      <div class="profile-actions compact">
+        <button type="button" class="accent-btn" data-open-client="${client?.id || ""}" data-phone="${session.clientPhone || ""}">
+          ${client?.id ? "Abrir ficha" : "Cadastrar cliente"}
         </button>
       </div>
     `;
@@ -198,12 +219,11 @@ async function loadQueue() {
         await loadClientProfile(client.id);
         return;
       }
-      const phone = normalizePhone(openBtn.dataset.phone || "");
-      if (phone) {
-        document.querySelector("#reg-phone").value = phone;
-      }
-      document.querySelector("#reg-name").focus();
-      alert("Cliente nao cadastrado. Use o formulario de cadastro rapido.");
+
+      beginNewClientDraft(openBtn.dataset.phone || "");
+      setProfileNotice("info", "Solicitação sem cadastro encontrado. Complete a ficha para criar o cliente.");
+      renderProfileFromState();
+      await loadOrders();
     });
 
     queueList.appendChild(card);
@@ -213,11 +233,14 @@ async function loadQueue() {
 async function loadClientProfile(clientId) {
   const clientSnap = await getDoc(doc(db, COLLECTIONS.clients, clientId));
   if (!clientSnap.exists()) {
-    profileContainer.className = "profile-empty";
-    profileContainer.textContent = "Cliente nao encontrado.";
-    historyList.innerHTML = "";
     state.selectedClientId = null;
     state.selectedPhone = null;
+    state.draftMode = "empty";
+    state.clientDraft = null;
+    state.clientOriginal = null;
+    state.profileContext = null;
+    renderEmptyProfile("Cliente não encontrado.");
+    historyList.innerHTML = "";
     return;
   }
 
@@ -227,125 +250,469 @@ async function loadClientProfile(clientId) {
   const verificationSnap = await getDoc(doc(db, COLLECTIONS.clientVerifications, client.id));
   const verification = verificationSnap.exists() ? verificationSnap.data() : null;
   const latestPnvRequest = await getLatestPnvRequestForClient(client.id);
+  const activeSession = await getLatestOpenSessionForClient(client.id);
 
   state.selectedClientId = client.id;
   state.selectedPhone = client.phone || null;
-  renderClientProfile(client, profile, verification, latestPnvRequest);
+  state.draftMode = "existing";
+  state.clientOriginal = buildDraftFromClient(client);
+  state.clientDraft = { ...state.clientOriginal };
+  state.sections.verification = verification?.status !== "verified";
+
+  renderClientProfile(client, profile, verification, latestPnvRequest, activeSession);
   await loadHistory(client.id);
   await loadOrders(client.id);
 }
 
-function renderClientProfile(client, profile, verification, latestPnvRequest) {
-  const financialStatus = !client.freeFirstSupportUsed
-    ? "primeiro atendimento gratis pendente"
-    : (client.credits ?? 0) > 0
-      ? "com credito"
-      : "sem credito";
-  const verificationStatus = verification?.status || "pending";
-  const verificationReason = verification?.mismatchReason || latestPnvRequest?.reason || null;
-  const latestPnvText = latestPnvRequest
-    ? `${latestPnvRequest.status || "-"} em ${formatDate(latestPnvRequest.updatedAt || latestPnvRequest.createdAt)}`
-    : "-";
+function beginNewClientDraft(phone = "") {
+  const normalized = normalizePhone(phone) || String(phone || "").trim();
+  state.selectedClientId = null;
+  state.selectedPhone = normalized || null;
+  state.draftMode = "new";
+  state.clientOriginal = {
+    name: "",
+    phone: normalized || "",
+    email: "",
+    notes: ""
+  };
+  state.clientDraft = { ...state.clientOriginal };
+  state.profileContext = {
+    client: null,
+    profile: null,
+    verification: null,
+    latestPnvRequest: null,
+    activeSession: null
+  };
+  historyList.innerHTML = "<small>O histórico aparecerá após o primeiro cadastro e atendimento.</small>";
+}
 
-  profileContainer.className = "";
+function renderProfileFromState() {
+  const context = state.profileContext;
+  if (!context) {
+    renderEmptyProfile();
+    return;
+  }
+
+  renderClientProfile(
+    context.client,
+    context.profile,
+    context.verification,
+    context.latestPnvRequest,
+    context.activeSession
+  );
+}
+
+function renderEmptyProfile(message = "Selecione um cliente da fila ou busque por telefone.") {
+  profileContainer.className = "profile-empty";
   profileContainer.innerHTML = `
-    <div class="profile-grid">
-      <div><strong>Nome</strong>${client.name || "-"}</div>
-      <div><strong>Telefone</strong>${client.phone || "-"}</div>
-      <div><strong>E-mail principal</strong>${client.primaryEmail || "-"}</div>
-      <div><strong>Creditos disponiveis</strong>${client.credits ?? 0}</div>
-      <div><strong>Atendimentos usados</strong>${client.supportsUsed ?? 0}</div>
-      <div><strong>Primeiro gratis usado</strong>${client.freeFirstSupportUsed ? "Sim" : "Nao"}</div>
-      <div><strong>Status financeiro</strong>${financialStatus}</div>
-      <div><strong>Total de sessoes</strong>${profile?.totalSessions ?? 0}</div>
-      <div><strong>Total pago</strong>${profile?.totalPaidSessions ?? 0}</div>
-      <div><strong>Total gratis</strong>${profile?.totalFreeSessions ?? 0}</div>
-      <div><strong>Creditos comprados</strong>${profile?.totalCreditsPurchased ?? 0}</div>
-      <div><strong>Creditos usados</strong>${profile?.totalCreditsUsed ?? 0}</div>
-      <div><strong>Status verificacao</strong>${verificationStatusLabel(verificationStatus)}</div>
-      <div><strong>Telefone verificado</strong>${verification?.verifiedPhone || "-"}</div>
-      <div><strong>Ultima tentativa PNV</strong>${latestPnvText}</div>
-      <div><strong>Motivo tecnico</strong>${verificationReason || "-"}</div>
-      <div><strong>Observacoes</strong>${client.notes || "-"}</div>
+    <div class="profile-empty-shell">
+      <span class="eyebrow">Workspace do atendimento</span>
+      <h3>Ficha pronta para consulta, cadastro e ajustes rápidos.</h3>
+      <p>${escapeHtml(message)}</p>
+      <div class="empty-tips">
+        <div>
+          <strong>Buscar cliente</strong>
+          <span>Use o telefone para abrir a ficha existente.</span>
+        </div>
+        <div>
+          <strong>Novo cadastro</strong>
+          <span>Se não existir registro, iniciamos a ficha com os dados mínimos.</span>
+        </div>
+        <div>
+          <strong>Menos ruído</strong>
+          <span>Ações sensíveis ficam recolhidas até quando fizerem sentido.</span>
+        </div>
+      </div>
     </div>
-    <div class="profile-actions">
-      <button type="button" id="btn-add-note">Adicionar observacao</button>
-      <button type="button" id="btn-add-credit">Adicionar credito manualmente</button>
-      <button type="button" id="btn-remove-credit">Remover credito manualmente</button>
-      <button type="button" id="btn-request-manual-pnv">Solicitar fallback manual</button>
-      <button type="button" id="btn-mark-verified-manual">Confirmar verificacao manual</button>
-      <button type="button" id="btn-mark-mismatch">Marcar divergente</button>
-      <button type="button" id="btn-close-session">Registrar atendimento concluido</button>
+  `;
+}
+function renderClientProfile(client, profile, verification, latestPnvRequest, activeSession) {
+  state.profileContext = {
+    client,
+    profile,
+    verification,
+    latestPnvRequest,
+    activeSession
+  };
+
+  const draft = state.clientDraft || buildDraftFromClient(client);
+  const isNewDraft = !client && state.draftMode === "new";
+  const verificationStatus = verification?.status || "pending";
+  const latestPnvText = latestPnvRequest
+    ? `${pnvStatusLabel(latestPnvRequest.status)} em ${formatDate(latestPnvRequest.updatedAt || latestPnvRequest.createdAt)}`
+    : "Sem solicitação recente";
+  const verificationReason = verification?.mismatchReason || latestPnvRequest?.reason || "Sem observação técnica";
+  const financialStatus = client
+    ? !client.freeFirstSupportUsed
+      ? "Primeiro atendimento gratuito disponível"
+      : (client.credits ?? 0) > 0
+        ? "Com crédito disponível"
+        : "Sem crédito disponível"
+    : "Cadastro pendente";
+  const primaryAction = getPrimaryActionMeta();
+  const verificationExpanded = Boolean(client) && (
+    state.sections.verification
+    || verificationStatus !== "verified"
+    || latestPnvRequest?.status === "manual_pending"
+  );
+  const headline = draft.name || (client?.name || "Novo cadastro");
+  const contextLine = activeSession
+    ? `Sessão ${activeSession.id.slice(0, 8)} • ${sessionStatusLabel(activeSession.status)}`
+    : isNewDraft
+      ? "Preencha os dados principais para criar a ficha."
+      : "Sem sessão/chamado ativo.";
+
+  profileContainer.className = "profile-mounted";
+  profileContainer.innerHTML = `
+    <div class="client-shell">
+      <div class="client-hero">
+        <div class="client-hero-copy">
+          <span class="eyebrow">${isNewDraft ? "Novo cadastro" : "Ficha do cliente"}</span>
+          <h3 id="profile-hero-title">${escapeHtml(headline)}</h3>
+          <p>${escapeHtml(contextLine)}</p>
+        </div>
+        <div class="hero-status">
+          <span class="status-pill ${client ? financialStatusTone(client) : "info"}">${escapeHtml(financialStatus)}</span>
+          <span class="status-pill ${verificationBadgeClass(verificationStatus)}">${escapeHtml(verificationStatusLabel(verificationStatus))}</span>
+          ${client ? `<span class="status-pill subtle">${escapeHtml(client.id)}</span>` : ""}
+        </div>
+      </div>
+
+      ${renderProfileNotice()}
+
+      <div class="client-workspace">
+        <aside class="client-summary">
+          <div class="summary-card">
+            <span class="summary-kicker">Contato principal</span>
+            <strong id="summary-phone">${escapeHtml(normalizePhone(draft.phone) || draft.phone || "Telefone não informado")}</strong>
+            <span id="summary-email">${escapeHtml(draft.email || "Sem e-mail principal")}</span>
+          </div>
+
+          <div class="summary-stats">
+            ${renderSummaryStat("Créditos", client ? client.credits ?? 0 : "—")}
+            ${renderSummaryStat("Atendimentos usados", client ? client.supportsUsed ?? 0 : "—")}
+            ${renderSummaryStat("Total de sessões", client ? profile?.totalSessions ?? 0 : "—")}
+            ${renderSummaryStat("Primeiro suporte", client ? (client.freeFirstSupportUsed ? "Já usado" : "Disponível") : "Pendente")}
+            ${renderSummaryStat("Verificação", client ? verificationStatusLabel(verificationStatus) : "Novo cadastro")}
+            ${renderSummaryStat("Último fallback", client ? latestPnvText : "Ainda não solicitado")}
+          </div>
+
+          ${client ? `
+            <div class="action-cluster">
+              <div class="cluster-title">Ações rápidas</div>
+              <div class="action-grid">
+                <button type="button" class="toolbar-btn" data-action="add-credit">+1 crédito</button>
+                <button type="button" class="toolbar-btn" data-action="remove-credit">-1 crédito</button>
+                <button type="button" class="toolbar-btn" data-action="request-manual-pnv">Solicitar fallback manual</button>
+              </div>
+            </div>
+            <div class="summary-footnote">
+              <strong>Motivo técnico</strong>
+              <span>${escapeHtml(verificationReason)}</span>
+            </div>
+          ` : ""}
+        </aside>
+
+        <section class="client-editor">
+          <form id="client-profile-form" class="client-form">
+            <div class="form-grid">
+              <label class="field">
+                <span>Nome</span>
+                <input id="client-name" type="text" value="${escapeHtml(draft.name || "")}" placeholder="Nome do cliente" required>
+              </label>
+
+              <label class="field">
+                <span>Telefone</span>
+                <input id="client-phone" type="text" value="${escapeHtml(draft.phone || "")}" placeholder="+5565..." required>
+              </label>
+
+              <label class="field field-wide">
+                <span>E-mail principal (opcional)</span>
+                <input id="client-email" type="email" value="${escapeHtml(draft.email || "")}" placeholder="manual e com consentimento">
+              </label>
+
+              <label class="field field-wide notes-field">
+                <span>Observações</span>
+                <textarea id="client-notes" rows="5" placeholder="Contexto útil, histórico, validações e acordos com o cliente.">${escapeHtml(draft.notes || "")}</textarea>
+              </label>
+            </div>
+
+            <div class="form-footer">
+              <div class="form-guidance">
+                <strong id="profile-form-status">${escapeHtml(primaryAction.helperTitle)}</strong>
+                <p id="profile-form-hint">${escapeHtml(primaryAction.helperText)}</p>
+              </div>
+              <button id="client-save-btn" class="primary-btn ${primaryAction.disabled ? "" : "is-ready"}" type="submit" ${primaryAction.disabled ? "disabled" : ""}>
+                ${escapeHtml(primaryAction.label)}
+              </button>
+            </div>
+          </form>
+
+          ${client ? `
+            <div class="details-block ${verificationExpanded ? "is-open" : ""}">
+              <button type="button" class="section-toggle" id="toggle-verification">
+                <span>Verificação e segurança</span>
+                <small>${escapeHtml(verificationExpanded ? "Ocultar" : "Expandir")}</small>
+              </button>
+              <div class="details-body">
+                <div class="detail-grid">
+                  <div>
+                    <strong>Status atual</strong>
+                    <span>${escapeHtml(verificationStatusLabel(verificationStatus))}</span>
+                  </div>
+                  <div>
+                    <strong>Telefone verificado</strong>
+                    <span>${escapeHtml(verification?.verifiedPhone || "Ainda não confirmado")}</span>
+                  </div>
+                  <div>
+                    <strong>Última tentativa</strong>
+                    <span>${escapeHtml(latestPnvText)}</span>
+                  </div>
+                  <div>
+                    <strong>Motivo técnico</strong>
+                    <span>${escapeHtml(verificationReason)}</span>
+                  </div>
+                </div>
+                <div class="detail-actions">
+                  <button type="button" class="toolbar-btn" data-action="mark-verified-manual">Confirmar manualmente</button>
+                  <button type="button" class="toolbar-btn" data-action="mark-mismatch">Marcar divergência</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="details-block is-open">
+              <div class="section-heading">
+                <div>
+                  <h4>Atendimento</h4>
+                  <p>${escapeHtml(activeSession ? "Finalize o chamado ativo quando a intervenção estiver concluída." : "Sem sessão ativa no momento.")}</p>
+                </div>
+                ${activeSession ? '<span class="status-pill info">Sessão ativa</span>' : ""}
+              </div>
+              <div class="detail-actions">
+                <button type="button" class="toolbar-btn ${activeSession ? "accent" : ""}" data-action="close-session" ${activeSession ? "" : "disabled"}>
+                  Registrar atendimento concluído
+                </button>
+              </div>
+            </div>
+          ` : ""}
+        </section>
+      </div>
     </div>
   `;
 
-  profileContainer.querySelector("#btn-add-note")
-    .addEventListener("click", async () => {
-      const note = prompt("Digite a observacao:");
-      if (!note) return;
-      await appendClientNotes(client.id, note);
-      await loadClientProfile(client.id);
-    });
+  bindProfileInteractions(client);
+  syncProfileEditorState();
+}
+function bindProfileInteractions(client) {
+  const form = profileContainer.querySelector("#client-profile-form");
+  if (form) {
+    const syncDraft = () => {
+      state.clientDraft = readDraftFromForm(form);
+      syncProfileEditorState();
+    };
 
-  profileContainer.querySelector("#btn-add-credit")
-    .addEventListener("click", async () => {
-      const amount = Number(prompt("Quantos creditos adicionar?", "1"));
-      if (!Number.isFinite(amount) || amount <= 0) return;
-      await adjustCredits(client.id, Math.floor(amount));
-      await loadClientProfile(client.id);
-    });
-
-  profileContainer.querySelector("#btn-remove-credit")
-    .addEventListener("click", async () => {
-      const amount = Number(prompt("Quantos creditos remover?", "1"));
-      if (!Number.isFinite(amount) || amount <= 0) return;
-      await adjustCredits(client.id, -Math.floor(amount));
-      await loadClientProfile(client.id);
-    });
-
-  profileContainer.querySelector("#btn-request-manual-pnv")
-    .addEventListener("click", async () => {
-      await requestManualVerification(client);
-      await loadClientProfile(client.id);
-      await loadQueue();
-    });
-
-  profileContainer.querySelector("#btn-mark-verified-manual")
-    .addEventListener("click", async () => {
-      const manualPhone = normalizePhone(prompt("Informe o telefone confirmado manualmente:", client.phone || "") || "");
-      if (!manualPhone) {
-        alert("Telefone invalido.");
+    form.addEventListener("input", syncDraft);
+    form.addEventListener("change", syncDraft);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = getSanitizedDraft(state.clientDraft);
+      if (!payload.name || !payload.phone) {
+        alert("Nome e telefone são obrigatórios.");
         return;
       }
-      await confirmManualVerification(client, manualPhone);
-      await loadClientProfile(client.id);
-      await loadQueue();
-    });
 
-  profileContainer.querySelector("#btn-mark-mismatch")
-    .addEventListener("click", async () => {
-      const reason = prompt("Motivo da divergencia:", "phone_divergent_manual") || "phone_divergent_manual";
-      await markVerificationMismatch(client, reason);
-      await loadClientProfile(client.id);
-      await loadQueue();
+      try {
+        const clientId = await registerOrUpdateClient(payload);
+        state.profileNotice = {
+          tone: "ok",
+          text: client ? "Alterações salvas com sucesso." : "Cliente cadastrado com sucesso."
+        };
+        searchPhoneInput.value = payload.phone;
+        await loadClientProfile(clientId);
+        await loadQueue();
+      } catch (err) {
+        console.error(err);
+        alert(client ? "Não foi possível salvar as alterações." : "Não foi possível cadastrar o cliente.");
+      }
     });
+  }
 
-  profileContainer.querySelector("#btn-close-session")
-    .addEventListener("click", async () => {
-      const problemSummary = prompt("Resumo do problema:");
-      const solutionSummary = prompt("Solucao aplicada:");
-      await closeLatestOpenSession(client.id, {
-        problemSummary,
-        solutionSummary,
-        internalNotes: "Fechado pelo painel tecnico"
-      });
-      await loadClientProfile(client.id);
-      await loadQueue();
+  const toggleVerificationBtn = profileContainer.querySelector("#toggle-verification");
+  if (toggleVerificationBtn) {
+    toggleVerificationBtn.addEventListener("click", () => {
+      state.sections.verification = !state.sections.verification;
+      renderProfileFromState();
     });
+  }
+
+  profileContainer.querySelectorAll("[data-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!client) return;
+      const action = button.dataset.action;
+      try {
+        if (action === "add-credit") {
+          await adjustCredits(client.id, 1);
+          setProfileNotice("ok", "Crédito adicionado com sucesso.");
+        } else if (action === "remove-credit") {
+          await adjustCredits(client.id, -1);
+          setProfileNotice("ok", "Crédito removido com sucesso.");
+        } else if (action === "request-manual-pnv") {
+          await requestManualVerification(client);
+          setProfileNotice("ok", "Fallback manual solicitado.");
+        } else if (action === "mark-verified-manual") {
+          const manualPhone = normalizePhone(prompt("Informe o telefone confirmado manualmente:", client.phone || "") || "");
+          if (!manualPhone) {
+            alert("Telefone inválido.");
+            return;
+          }
+          await confirmManualVerification(client, manualPhone);
+          setProfileNotice("ok", "Verificação manual concluída com sucesso.");
+        } else if (action === "mark-mismatch") {
+          const reason = prompt("Motivo da divergência:", "phone_divergent_manual") || "phone_divergent_manual";
+          await markVerificationMismatch(client, reason);
+          setProfileNotice("warn", "Cliente marcado como divergente.");
+        } else if (action === "close-session") {
+          const problemSummary = prompt("Resumo do problema:");
+          const solutionSummary = prompt("Solução aplicada:");
+          await closeLatestOpenSession(client.id, {
+            problemSummary,
+            solutionSummary,
+            internalNotes: "Fechado pelo painel técnico"
+          });
+          setProfileNotice("ok", "Atendimento encerrado no painel técnico.");
+        }
+
+        await loadClientProfile(client.id);
+        await loadQueue();
+      } catch (err) {
+        console.error(err);
+        alert("Não foi possível concluir a ação solicitada.");
+      }
+    });
+  });
 }
 
+function syncProfileEditorState() {
+  const saveBtn = profileContainer.querySelector("#client-save-btn");
+  const statusNode = profileContainer.querySelector("#profile-form-status");
+  const hintNode = profileContainer.querySelector("#profile-form-hint");
+  const heroTitleNode = profileContainer.querySelector("#profile-hero-title");
+  const summaryPhoneNode = profileContainer.querySelector("#summary-phone");
+  const summaryEmailNode = profileContainer.querySelector("#summary-email");
+
+  if (!saveBtn || !statusNode || !hintNode) return;
+
+  const action = getPrimaryActionMeta();
+  saveBtn.textContent = action.label;
+  saveBtn.disabled = action.disabled;
+  saveBtn.classList.toggle("is-ready", !action.disabled);
+  statusNode.textContent = action.helperTitle;
+  hintNode.textContent = action.helperText;
+
+  if (heroTitleNode) {
+    heroTitleNode.textContent = state.clientDraft?.name || (state.draftMode === "new" ? "Novo cadastro" : "Cliente sem nome");
+  }
+
+  if (summaryPhoneNode) {
+    summaryPhoneNode.textContent = normalizePhone(state.clientDraft?.phone) || state.clientDraft?.phone || "Telefone não informado";
+  }
+
+  if (summaryEmailNode) {
+    summaryEmailNode.textContent = state.clientDraft?.email || "Sem e-mail principal";
+  }
+}
+
+function getPrimaryActionMeta() {
+  const sanitizedDraft = getSanitizedDraft(state.clientDraft);
+  const hasName = Boolean(sanitizedDraft.name);
+  const hasPhone = Boolean(sanitizedDraft.phone);
+  const isValid = hasName && hasPhone;
+  const isDirty = isProfileDirty();
+
+  if (state.draftMode === "new") {
+    return {
+      label: "Cadastrar cliente",
+      disabled: !isValid,
+      helperTitle: "Cadastro novo",
+      helperText: isValid
+        ? "Tudo pronto para criar a ficha com os dados principais."
+        : "Preencha nome e telefone para habilitar o cadastro."
+    };
+  }
+
+  return {
+    label: isDirty ? "Salvar alterações" : "Sem alterações",
+    disabled: !isValid || !isDirty,
+    helperTitle: isDirty ? "Alterações prontas para salvar" : "Ficha sincronizada",
+    helperText: !isValid
+      ? "Corrija os campos obrigatórios para liberar o salvamento."
+      : isDirty
+        ? "Revise os campos editados e confirme para atualizar a ficha."
+        : "Edite nome, telefone, e-mail ou observações para ativar o salvamento."
+  };
+}
+
+function isProfileDirty() {
+  if (!state.clientDraft || !state.clientOriginal) return false;
+
+  const current = getSanitizedDraft(state.clientDraft);
+  const original = getSanitizedDraft(state.clientOriginal);
+  return current.name !== original.name
+    || current.phone !== original.phone
+    || current.email !== original.email
+    || current.notes !== original.notes;
+}
+
+function readDraftFromForm(form) {
+  return {
+    name: form.querySelector("#client-name")?.value || "",
+    phone: form.querySelector("#client-phone")?.value || "",
+    email: form.querySelector("#client-email")?.value || "",
+    notes: form.querySelector("#client-notes")?.value || ""
+  };
+}
+
+function getSanitizedDraft(draft) {
+  return {
+    name: String(draft?.name || "").trim(),
+    phone: normalizePhone(draft?.phone) || "",
+    email: String(draft?.email || "").trim(),
+    notes: String(draft?.notes || "").trim()
+  };
+}
+
+function buildDraftFromClient(client) {
+  return {
+    name: client?.name || "",
+    phone: client?.phone || "",
+    email: client?.primaryEmail || "",
+    notes: client?.notes || ""
+  };
+}
+
+function renderProfileNotice() {
+  if (!state.profileNotice) return "";
+  return `
+    <div class="inline-notice ${escapeHtml(state.profileNotice.tone || "info")}">
+      ${escapeHtml(state.profileNotice.text || "")}
+    </div>
+  `;
+}
+
+function setProfileNotice(tone, text) {
+  state.profileNotice = { tone, text };
+}
+
+function renderSummaryStat(label, value) {
+  return `
+    <div class="summary-stat">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </div>
+  `;
+}
 async function loadHistory(clientId) {
-  historyList.innerHTML = "<small>Carregando historico...</small>";
+  historyList.innerHTML = "<small>Carregando histórico...</small>";
   const sessionsSnap = await getDocs(query(collection(db, COLLECTIONS.supportSessions)));
   const reportsSnap = await getDocs(query(collection(db, COLLECTIONS.supportReports)));
 
@@ -362,7 +729,7 @@ async function loadHistory(clientId) {
   );
 
   if (!sessions.length) {
-    historyList.innerHTML = "<small>Sem historico de atendimento.</small>";
+    historyList.innerHTML = "<small>Sem histórico de atendimento.</small>";
     return;
   }
 
@@ -372,12 +739,15 @@ async function loadHistory(clientId) {
     const item = document.createElement("article");
     item.className = "history-item";
     item.innerHTML = `
-      <strong>${formatDate(session.startedAt)} - ${session.status || "-"}</strong>
-      <div>Tecnico: ${session.techName || session.techId || "-"}</div>
-      <div>Problema: ${session.problemSummary || "-"}</div>
-      <div>Solucao: ${session.solutionSummary || report?.solutionApplied || "-"}</div>
-      <div>Observacoes: ${session.internalNotes || report?.actionsTaken || "-"}</div>
-      <div>Gratuito: ${session.isFreeFirstSupport ? "Sim" : "Nao"} | Creditos consumidos: ${session.creditsConsumed ?? 0}</div>
+      <div class="history-head">
+        <strong>${escapeHtml(formatDate(session.startedAt))}</strong>
+        <span class="badge ${session.status === "completed" ? "ok" : "warn"}">${escapeHtml(sessionStatusLabel(session.status))}</span>
+      </div>
+      <div>Técnico: ${escapeHtml(session.techName || session.techId || "-")}</div>
+      <div>Problema: ${escapeHtml(session.problemSummary || "-")}</div>
+      <div>Solução: ${escapeHtml(session.solutionSummary || report?.solutionApplied || "-")}</div>
+      <div>Observações: ${escapeHtml(session.internalNotes || report?.actionsTaken || "-")}</div>
+      <div>Gratuito: ${session.isFreeFirstSupport ? "Sim" : "Não"} | Créditos consumidos: ${escapeHtml(String(session.creditsConsumed ?? 0))}</div>
     `;
     historyList.appendChild(item);
   });
@@ -393,7 +763,7 @@ async function loadOrders(clientId = null) {
     .slice(0, 40);
 
   if (!rows.length) {
-    ordersList.innerHTML = "<small>Sem pedidos de credito.</small>";
+    ordersList.innerHTML = `<small>${clientId ? "Sem pedidos de crédito para este cliente." : "Sem pedidos de crédito."}</small>`;
     return;
   }
 
@@ -403,12 +773,14 @@ async function loadOrders(clientId = null) {
     const item = document.createElement("article");
     item.className = "order-item";
     item.innerHTML = `
-      <strong>${pkg?.name || order.packageId || "-"}</strong>
-      <div>Cliente: ${order.clientId || "-"}</div>
-      <div>Metodo: ${order.paymentMethod || "-"}</div>
-      <div>Status: ${order.status || "-"}</div>
-      <div>Valor: ${formatMoney(order.amountCents || 0)}</div>
-      <div>WhatsApp: ${order.whatsappRequested ? "Sim" : "Nao"}</div>
+      <div class="history-head">
+        <strong>${escapeHtml(pkg?.name || order.packageId || "-")}</strong>
+        <span class="badge ${order.status === "approved" ? "ok" : "warn"}">${escapeHtml(order.status || "-")}</span>
+      </div>
+      <div>Cliente: ${escapeHtml(order.clientId || "-")}</div>
+      <div>Método: ${escapeHtml(order.paymentMethod || "-")}</div>
+      <div>Valor: ${escapeHtml(formatMoney(order.amountCents || 0))}</div>
+      <div>Solicitado via WhatsApp: ${order.whatsappRequested ? "Sim" : "Não"}</div>
     `;
     ordersList.appendChild(item);
   });
@@ -420,6 +792,14 @@ async function getLatestPnvRequestForClient(clientId) {
     .map((item) => ({ id: item.id, ...item.data() }))
     .filter((request) => request.clientId === clientId)
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0))[0] || null;
+}
+
+async function getLatestOpenSessionForClient(clientId) {
+  const snap = await getDocs(collection(db, COLLECTIONS.supportSessions));
+  return snap.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .filter((row) => row.clientId === clientId && (row.status === "in_progress" || row.status === "queued"))
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] || null;
 }
 
 async function resolveClientUidByClientId(clientId) {
@@ -474,7 +854,6 @@ async function resolveClientIdByPhone(phone) {
 
   return bestClient?.id || null;
 }
-
 async function requestManualVerification(client) {
   const now = Date.now();
   const pnvRequestExpiresAt = expiresAtFromMillis(now, RETENTION_DAYS.pnvRequests);
@@ -642,7 +1021,7 @@ async function closeLatestOpenSession(clientId, payload) {
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
 
   if (!latest) {
-    alert("Nenhuma sessao aberta encontrada para este cliente.");
+    alert("Nenhuma sessão aberta encontrada para este cliente.");
     return;
   }
 
@@ -720,7 +1099,6 @@ async function closeLatestOpenSession(clientId, payload) {
     followUpNeeded: false
   });
 }
-
 function expiresAtFromMillis(baseMillis, days) {
   const safeDays = Number.isFinite(days) ? Math.max(0, days) : 0;
   return Timestamp.fromMillis(baseMillis + safeDays * 24 * 60 * 60 * 1000);
@@ -737,12 +1115,37 @@ function verificationStatusLabel(status) {
     case "verified":
       return "Verificado";
     case "manual_required":
-      return "Manual necessario";
+      return "Ação manual necessária";
     case "mismatch":
       return "Divergente";
     case "pending":
     default:
       return "Pendente";
+  }
+}
+
+function pnvStatusLabel(status) {
+  switch (status) {
+    case "processed":
+      return "Tratado manualmente";
+    case "manual_pending":
+      return "Aguardando ação manual";
+    case "pending":
+    default:
+      return "Pendente";
+  }
+}
+
+function sessionStatusLabel(status) {
+  switch (status) {
+    case "completed":
+      return "Concluída";
+    case "in_progress":
+      return "Em andamento";
+    case "queued":
+      return "Na fila";
+    default:
+      return status || "-";
   }
 }
 
@@ -760,6 +1163,12 @@ function verificationBadgeClass(status) {
   }
 }
 
+function financialStatusTone(client) {
+  if (!client.freeFirstSupportUsed) return "info";
+  if ((client.credits ?? 0) > 0) return "ok";
+  return "warn";
+}
+
 function normalizePhone(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
@@ -775,7 +1184,8 @@ function clientDocIdFromPhone(phone) {
 
 function formatDate(ts) {
   if (!ts) return "-";
-  return new Date(ts).toLocaleString("pt-BR");
+  const millis = typeof ts?.toMillis === "function" ? ts.toMillis() : ts;
+  return new Date(millis).toLocaleString("pt-BR");
 }
 
 function formatMoney(cents) {
@@ -784,3 +1194,14 @@ function formatMoney(cents) {
     currency: "BRL"
   }).format((Number(cents) || 0) / 100);
 }
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+void appendClientNotes;
