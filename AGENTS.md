@@ -43,3 +43,13 @@ O resumo deve conter, no minimo:
 
 - Garantir que os dois repositorios oficiais estejam sincronizados com `origin/main` quando o objetivo for checkpoint em nuvem.
 - Nao remover os scripts `tools/codex-memory.ps1`, `tools/bootstrap-recovery.ps1` e `tools/check-recovery-readiness.ps1`.
+
+## Regra de ouro de fronteira entre repositorios (obrigatoria)
+
+- Aplicar separacao por dominio mesmo sem solicitacao explicita do usuario.
+- Codigo Android/mobile deve permanecer no repo Android (`suportex-android`).
+- Codigo Web/Servidor (HTML/JS/CSS, backend Node, regras Firebase, docs web) deve permanecer no repo Web/Servidor (`suporte-x-servidor`).
+- Ao detectar arquivo em repositorio incorreto, mover para o repositorio correto antes de finalizar a tarefa.
+- Antes de encerrar checkpoint em nuvem, confirmar estruturalmente:
+  - repo Android: `main == origin/main` (0 ahead / 0 behind), remoto `suportex-android`;
+  - repo Web/Servidor: `main == origin/main` (0 ahead / 0 behind), remoto `suporte-x-servidor`.

@@ -1,6 +1,6 @@
 # SuporteX - Continuidade e Recuperacao
 
-Atualizado em: 2026-04-02
+Atualizado em: 2026-04-06
 
 ## Objetivo
 
@@ -16,6 +16,13 @@ Garantir que o projeto possa ser retomado em outra maquina sem copia manual de H
 - `%USERPROFILE%\AndroidStudioProjects\SuporteX` (repo Android)
 - `%USERPROFILE%\Workspaces\SuporteX\web-servidor` (repo Web/Servidor)
 - `%USERPROFILE%\Workspaces\SuporteX\android-app` (junction para o repo Android)
+
+## Fronteira de codigo (padrao obrigatorio)
+
+- No repo Android: somente codigo/app Android e scripts de continuidade local.
+- No repo Web/Servidor: somente backend Web, central web e documentacao web.
+- Nao reintroduzir `tech-panel` legado e docs de backend dentro do repo Android.
+- Nao reintroduzir placeholder `android/` dentro do repo Web/Servidor.
 
 ## Itens que NAO sobem para GitHub (precisam de backup separado)
 
