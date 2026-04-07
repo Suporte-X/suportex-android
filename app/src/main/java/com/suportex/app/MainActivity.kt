@@ -69,6 +69,7 @@ import com.suportex.app.ui.screens.PixPlaceholderScreen
 import com.suportex.app.ui.screens.PurchaseCreditsScreen
 import com.suportex.app.ui.screens.SessionFeedbackScreen
 import com.suportex.app.ui.screens.SessionScreen
+import com.suportex.app.ui.screens.StartupLoadingScreen
 import com.suportex.app.ui.screens.SupportHomeScreen
 import io.socket.client.IO
 import io.socket.client.Socket
@@ -1598,8 +1599,17 @@ class MainActivity : ComponentActivity() {
                 var supportQueueWaitStats by remember { mutableStateOf<SupportQueueWaitStats?>(null) }
                 var selectedPackage by remember { mutableStateOf<CreditPackageRecord?>(null) }
                 var autoOpenedPurchaseClientId by rememberSaveable { mutableStateOf<String?>(null) }
+                var bootstrapHomeLoaded by remember { mutableStateOf(false) }
+                var bootstrapQueueLoaded by remember { mutableStateOf(false) }
+                var showStartupLoading by rememberSaveable { mutableStateOf(true) }
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
+
+                fun finishStartupLoadingIfReady() {
+                    if (showStartupLoading && bootstrapHomeLoaded && bootstrapQueueLoaded) {
+                        showStartupLoading = false
+                    }
+                }
 
                 BackHandler {
                     when (current) {
@@ -1658,9 +1668,13 @@ class MainActivity : ComponentActivity() {
                         if (selectedPackage == null) {
                             selectedPackage = snapshot.packages.firstOrNull()
                         }
+                        bootstrapHomeLoaded = true
+                        finishStartupLoadingIfReady()
                     }
                     loadSupportQueueWaitStats { stats ->
                         supportQueueWaitStats = stats
+                        bootstrapQueueLoaded = true
+                        finishStartupLoadingIfReady()
                     }
                 }
 
@@ -1703,7 +1717,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    when (current) {
+                    if (showStartupLoading) {
+                        StartupLoadingScreen()
+                    } else {
+                        when (current) {
                         Screen.HOME -> SupportHomeScreen(
                             homeSnapshot = homeSnapshot,
                             onRequestSupport = {
@@ -1912,6 +1929,7 @@ class MainActivity : ComponentActivity() {
                                 current = Screen.HOME
                             }
                         )
+                        }
                     }
                 }
 
