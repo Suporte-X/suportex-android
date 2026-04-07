@@ -114,10 +114,11 @@ fun SessionFeedbackScreen(
                     Spacer(Modifier.height(16.dp))
 
                     Text(
-                        text = "0 = totalmente insatisfeito \u2022 5 = totalmente satisfeito",
+                        text = "0 = totalmente insatisfeito\n5 = totalmente satisfeito",
                         color = Color(0xFF667085),
                         textAlign = TextAlign.Center,
-                        fontSize = 14.sp
+                        fontSize = 14.sp,
+                        lineHeight = 22.sp
                     )
                 }
 
@@ -130,8 +131,8 @@ fun SessionFeedbackScreen(
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .height(14.dp)
-                    .padding(bottom = 20.dp)
+                    .padding(bottom = 56.dp)
+                    .height(12.dp)
                     .clip(RoundedCornerShape(999.dp)),
                 color = Color(0xFFFFCB19),
                 trackColor = Color(0x1A000000)
