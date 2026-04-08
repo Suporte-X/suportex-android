@@ -1601,13 +1601,58 @@ class MainActivity : ComponentActivity() {
                 var autoOpenedPurchaseClientId by rememberSaveable { mutableStateOf<String?>(null) }
                 var bootstrapHomeLoaded by remember { mutableStateOf(false) }
                 var bootstrapQueueLoaded by remember { mutableStateOf(false) }
+                var bootstrapAccessLoaded by remember { mutableStateOf(false) }
                 var showStartupLoading by rememberSaveable { mutableStateOf(true) }
+                var preloadedSupportDecision by remember { mutableStateOf<SupportAccessDecision?>(null) }
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
 
                 fun finishStartupLoadingIfReady() {
-                    if (showStartupLoading && bootstrapHomeLoaded && bootstrapQueueLoaded) {
+                    if (showStartupLoading &&
+                        bootstrapHomeLoaded &&
+                        bootstrapQueueLoaded &&
+                        bootstrapAccessLoaded
+                    ) {
                         showStartupLoading = false
+                    }
+                }
+
+                fun handleSupportAccessDecision(decision: SupportAccessDecision) {
+                    when (decision) {
+                        is SupportAccessDecision.Allowed -> {
+                            current = Screen.WAITING
+                            requestSupport(
+                                startContext = decision.startContext,
+                                clientName = decision.client?.name ?: "Cliente"
+                            )
+                            loadHomeSnapshot { snapshot ->
+                                homeSnapshot = snapshot
+                                selectedPackage = selectedPackage
+                                    ?: snapshot.packages.firstOrNull()
+                            }
+                        }
+
+                        is SupportAccessDecision.BlockedNeedsCredit -> {
+                            homeSnapshot = homeSnapshot.copy(
+                                client = decision.client,
+                                clientMeta = homeSnapshot.clientMeta,
+                                packages = decision.packages
+                            )
+                            selectedPackage = decision.packages.firstOrNull()
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Sem credito disponivel",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+
+                        is SupportAccessDecision.BlockedUnavailable -> {
+                            Toast.makeText(
+                                this@MainActivity,
+                                decision.message,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                 }
 
@@ -1676,6 +1721,11 @@ class MainActivity : ComponentActivity() {
                         bootstrapQueueLoaded = true
                         finishStartupLoadingIfReady()
                     }
+                    evaluateSupportEntry { decision ->
+                        preloadedSupportDecision = decision
+                        bootstrapAccessLoaded = true
+                        finishStartupLoadingIfReady()
+                    }
                 }
 
                 LaunchedEffect(current) {
@@ -1685,6 +1735,9 @@ class MainActivity : ComponentActivity() {
                             if (selectedPackage == null) {
                                 selectedPackage = snapshot.packages.firstOrNull()
                             }
+                        }
+                        evaluateSupportEntry { decision ->
+                            preloadedSupportDecision = decision
                         }
                     }
                 }
@@ -1735,42 +1788,13 @@ class MainActivity : ComponentActivity() {
                                     return@SupportHomeScreen
                                 }
 
-                                evaluateSupportEntry { decision ->
-                                    when (decision) {
-                                        is SupportAccessDecision.Allowed -> {
-                                            current = Screen.WAITING
-                                            requestSupport(
-                                                startContext = decision.startContext,
-                                                clientName = decision.client?.name ?: "Cliente"
-                                            )
-                                            loadHomeSnapshot { snapshot ->
-                                                homeSnapshot = snapshot
-                                                selectedPackage = selectedPackage
-                                                    ?: snapshot.packages.firstOrNull()
-                                            }
-                                        }
-
-                                        is SupportAccessDecision.BlockedNeedsCredit -> {
-                                            homeSnapshot = homeSnapshot.copy(
-                                                client = decision.client,
-                                                clientMeta = homeSnapshot.clientMeta,
-                                                packages = decision.packages
-                                            )
-                                            selectedPackage = decision.packages.firstOrNull()
-                                            Toast.makeText(
-                                                this@MainActivity,
-                                                "Sem credito disponivel",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-
-                                        is SupportAccessDecision.BlockedUnavailable -> {
-                                            Toast.makeText(
-                                                this@MainActivity,
-                                                decision.message,
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
+                                val cachedDecision = preloadedSupportDecision
+                                if (cachedDecision != null) {
+                                    handleSupportAccessDecision(cachedDecision)
+                                } else {
+                                    evaluateSupportEntry { decision ->
+                                        preloadedSupportDecision = decision
+                                        handleSupportAccessDecision(decision)
                                     }
                                 }
                             },
