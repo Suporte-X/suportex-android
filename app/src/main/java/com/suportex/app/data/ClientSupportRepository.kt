@@ -7,6 +7,7 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.suportex.app.Conn
 import com.suportex.app.data.model.ClientFinancialStatus
 import com.suportex.app.data.model.ClientHomeSnapshot
 import com.suportex.app.data.model.ClientMetaRecord
@@ -18,6 +19,9 @@ import com.suportex.app.data.model.SupportAccessDecision
 import com.suportex.app.data.model.SupportSessionRecord
 import com.suportex.app.data.model.SupportStartContext
 import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 import java.util.Date
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -42,6 +46,7 @@ class ClientSupportRepository(
     private val supportReports = db.collection("support_reports")
     private val creditPackages = db.collection("credit_packages")
     private val creditOrders = db.collection("credit_orders")
+    private val httpClient = OkHttpClient()
 
     suspend fun seedDefaultPackagesIfNeeded() {
         authRepository.ensureAnonAuth()
@@ -342,6 +347,54 @@ class ClientSupportRepository(
 
     suspend fun loadSupportQueueWaitStats(): SupportQueueWaitStats {
         val clientUid = authRepository.ensureAnonAuth()
+        val backendStats = runCatching { loadSupportQueueWaitStatsFromBackend() }
+            .getOrNull()
+        if (backendStats != null &&
+            backendStats.averageWaitMillis != null &&
+            backendStats.usedSampleSize > 0
+        ) {
+            return backendStats
+        }
+        return loadSupportQueueWaitStatsFromFirestore(clientUid)
+    }
+
+    private suspend fun loadSupportQueueWaitStatsFromBackend(): SupportQueueWaitStats? {
+        val token = authRepository.ensureAnonIdToken(forceRefresh = false).trim()
+        if (token.isBlank()) return null
+
+        val request = Request.Builder()
+            .url("${Conn.SERVER_BASE}/api/client/queue-stats")
+            .get()
+            .header("Authorization", "Bearer $token")
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val body = response.body?.string().orEmpty()
+            if (body.isBlank()) return null
+
+            val json = runCatching { JSONObject(body) }.getOrNull() ?: return null
+            val averageWaitRaw = json.optDouble("averageWaitMs", Double.NaN)
+            val averageWaitMillis = if (averageWaitRaw.isFinite() && averageWaitRaw >= 0.0) {
+                averageWaitRaw.toLong()
+            } else {
+                null
+            }
+            val queueDepth = json.optInt("queueSize", 0).coerceAtLeast(0)
+            val usedSampleSize = json.optInt("sampleSize", 0).coerceAtLeast(0)
+            val targetSampleSize = json.optInt("targetSampleSize", usedSampleSize)
+                .coerceAtLeast(usedSampleSize)
+
+            return SupportQueueWaitStats(
+                queueDepth = queueDepth,
+                targetSampleSize = targetSampleSize,
+                usedSampleSize = usedSampleSize,
+                averageWaitMillis = averageWaitMillis
+            )
+        }
+    }
+
+    private suspend fun loadSupportQueueWaitStatsFromFirestore(clientUid: String): SupportQueueWaitStats {
         val linkedClientId = resolveLinkedClientId(clientUid)
 
         val byUid = runCatching {
