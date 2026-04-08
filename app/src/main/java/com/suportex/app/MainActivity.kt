@@ -44,6 +44,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.suportex.app.data.ClientSupportRepository
 import com.suportex.app.data.ClientSupportRepository.SupportQueueWaitStats
@@ -1606,9 +1609,14 @@ class MainActivity : ComponentActivity() {
                 var bootstrapHomeLoaded by remember { mutableStateOf(false) }
                 var bootstrapQueueLoaded by remember { mutableStateOf(false) }
                 var bootstrapAccessLoaded by remember { mutableStateOf(false) }
-                var showStartupLoading by rememberSaveable { mutableStateOf(true) }
-                var showMainContent by rememberSaveable { mutableStateOf(false) }
+                var showStartupLoading by remember { mutableStateOf(true) }
+                var showMainContent by remember { mutableStateOf(false) }
                 var preloadedSupportDecision by remember { mutableStateOf<SupportAccessDecision?>(null) }
+                var bootstrapCycle by remember { mutableStateOf(0) }
+                var hasHandledFirstOnStart by remember { mutableStateOf(false) }
+                var skipInitialHomeRefresh by remember { mutableStateOf(true) }
+                val lifecycleOwner = LocalLifecycleOwner.current
+                val currentScreen by rememberUpdatedState(current)
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
 
@@ -1620,6 +1628,74 @@ class MainActivity : ComponentActivity() {
                     ) {
                         showMainContent = true
                         showStartupLoading = false
+                    }
+                }
+
+                fun mergeSnapshotWithSupportDecision(
+                    snapshot: ClientHomeSnapshot,
+                    decision: SupportAccessDecision?
+                ): ClientHomeSnapshot {
+                    return when (decision) {
+                        is SupportAccessDecision.Allowed -> {
+                            val decidedClient = decision.client ?: return snapshot
+                            snapshot.copy(client = decidedClient)
+                        }
+
+                        is SupportAccessDecision.BlockedNeedsCredit -> {
+                            snapshot.copy(
+                                client = decision.client,
+                                packages = decision.packages
+                            )
+                        }
+
+                        else -> snapshot
+                    }
+                }
+
+                fun syncHomeWithSupportDecision(decision: SupportAccessDecision?) {
+                    homeSnapshot = mergeSnapshotWithSupportDecision(homeSnapshot, decision)
+                    if (selectedPackage == null || homeSnapshot.packages.none { it.id == selectedPackage?.id }) {
+                        selectedPackage = homeSnapshot.packages.firstOrNull()
+                    }
+                }
+
+                fun startBootstrap(showAnimation: Boolean) {
+                    val cycle = bootstrapCycle + 1
+                    bootstrapCycle = cycle
+                    bootstrapHomeLoaded = false
+                    bootstrapQueueLoaded = false
+                    bootstrapAccessLoaded = false
+                    if (showAnimation) {
+                        showMainContent = false
+                        showStartupLoading = true
+                    }
+
+                    loadHomeSnapshot { snapshot ->
+                        if (cycle != bootstrapCycle) return@loadHomeSnapshot
+                        homeSnapshot = mergeSnapshotWithSupportDecision(
+                            snapshot = snapshot,
+                            decision = preloadedSupportDecision
+                        )
+                        if (selectedPackage == null) {
+                            selectedPackage = homeSnapshot.packages.firstOrNull()
+                        }
+                        bootstrapHomeLoaded = true
+                        finishStartupLoadingIfReady()
+                    }
+
+                    loadSupportQueueWaitStats { stats ->
+                        if (cycle != bootstrapCycle) return@loadSupportQueueWaitStats
+                        supportQueueWaitStats = stats
+                        bootstrapQueueLoaded = true
+                        finishStartupLoadingIfReady()
+                    }
+
+                    evaluateSupportEntry { decision ->
+                        if (cycle != bootstrapCycle) return@evaluateSupportEntry
+                        preloadedSupportDecision = decision
+                        syncHomeWithSupportDecision(decision)
+                        bootstrapAccessLoaded = true
+                        finishStartupLoadingIfReady()
                     }
                 }
 
@@ -1714,38 +1790,44 @@ class MainActivity : ComponentActivity() {
                     setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
                     setRecordingAudioFromActivity = { isRecordingAudio = it }
                     setEndedSessionForFeedback = { endedSessionId = it }
-                    loadHomeSnapshot { snapshot ->
-                        homeSnapshot = snapshot
-                        if (selectedPackage == null) {
-                            selectedPackage = snapshot.packages.firstOrNull()
-                        }
-                        bootstrapHomeLoaded = true
-                        finishStartupLoadingIfReady()
-                    }
-                    loadSupportQueueWaitStats { stats ->
-                        supportQueueWaitStats = stats
-                        bootstrapQueueLoaded = true
-                        finishStartupLoadingIfReady()
-                    }
-                    evaluateSupportEntry { decision ->
-                        preloadedSupportDecision = decision
-                        bootstrapAccessLoaded = true
-                        finishStartupLoadingIfReady()
-                    }
+                    startBootstrap(showAnimation = true)
                 }
 
                 LaunchedEffect(current) {
                     if (current == Screen.HOME) {
+                        if (skipInitialHomeRefresh) {
+                            skipInitialHomeRefresh = false
+                            return@LaunchedEffect
+                        }
                         loadHomeSnapshot { snapshot ->
-                            homeSnapshot = snapshot
+                            homeSnapshot = mergeSnapshotWithSupportDecision(
+                                snapshot = snapshot,
+                                decision = preloadedSupportDecision
+                            )
                             if (selectedPackage == null) {
-                                selectedPackage = snapshot.packages.firstOrNull()
+                                selectedPackage = homeSnapshot.packages.firstOrNull()
                             }
                         }
                         evaluateSupportEntry { decision ->
                             preloadedSupportDecision = decision
+                            syncHomeWithSupportDecision(decision)
                         }
                     }
+                }
+
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        if (event != Lifecycle.Event.ON_START) return@LifecycleEventObserver
+                        if (!hasHandledFirstOnStart) {
+                            hasHandledFirstOnStart = true
+                            return@LifecycleEventObserver
+                        }
+                        if (currentScreen == Screen.HOME) {
+                            startBootstrap(showAnimation = true)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
                 LaunchedEffect(current) {
@@ -1782,17 +1864,6 @@ class MainActivity : ComponentActivity() {
                         Screen.HOME -> SupportHomeScreen(
                             homeSnapshot = homeSnapshot,
                             onRequestSupport = {
-                                if (!homeSnapshot.canRequestSupport &&
-                                    supportFlowFlags.showCreditPanelOnlyForRegisteredClients
-                                ) {
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "Sem credito disponivel",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                    return@SupportHomeScreen
-                                }
-
                                 val cachedDecision = preloadedSupportDecision
                                 if (cachedDecision != null) {
                                     handleSupportAccessDecision(cachedDecision)

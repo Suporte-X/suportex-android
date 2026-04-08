@@ -130,10 +130,6 @@ class ClientSupportRepository(
                         displayName = null,
                         deviceAnchor = deviceAnchor
                     )
-                    sanitizedUid != null -> ensureClientByUid(
-                        clientUid = sanitizedUid,
-                        displayName = null
-                    )
                     else -> null
                 }
             }.getOrNull()
