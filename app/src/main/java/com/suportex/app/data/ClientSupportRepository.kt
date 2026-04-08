@@ -999,18 +999,6 @@ class ClientSupportRepository(
         )
     }
 
-    private suspend fun ensureClientByUid(
-        clientUid: String,
-        displayName: String?
-    ): EnsureClientResult {
-        val clientId = clientDocIdFromUid(clientUid)
-        return ensureClientRecord(
-            clientId = clientId,
-            normalizedPhone = null,
-            displayName = displayName
-        )
-    }
-
     private suspend fun ensureClientRecord(
         clientId: String,
         normalizedPhone: String?,
