@@ -20,6 +20,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -1603,6 +1607,7 @@ class MainActivity : ComponentActivity() {
                 var bootstrapQueueLoaded by remember { mutableStateOf(false) }
                 var bootstrapAccessLoaded by remember { mutableStateOf(false) }
                 var showStartupLoading by rememberSaveable { mutableStateOf(true) }
+                var showMainContent by rememberSaveable { mutableStateOf(false) }
                 var preloadedSupportDecision by remember { mutableStateOf<SupportAccessDecision?>(null) }
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
@@ -1613,6 +1618,7 @@ class MainActivity : ComponentActivity() {
                         bootstrapQueueLoaded &&
                         bootstrapAccessLoaded
                     ) {
+                        showMainContent = true
                         showStartupLoading = false
                     }
                 }
@@ -1770,10 +1776,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    if (showStartupLoading) {
-                        StartupLoadingScreen()
-                    } else {
-                        when (current) {
+                    Box(Modifier.fillMaxSize()) {
+                        if (showMainContent) {
+                            when (current) {
                         Screen.HOME -> SupportHomeScreen(
                             homeSnapshot = homeSnapshot,
                             onRequestSupport = {
@@ -1953,6 +1958,15 @@ class MainActivity : ComponentActivity() {
                                 current = Screen.HOME
                             }
                         )
+                            }
+                        }
+
+                        AnimatedVisibility(
+                            visible = showStartupLoading,
+                            enter = fadeIn(animationSpec = tween(durationMillis = 120)),
+                            exit = fadeOut(animationSpec = tween(durationMillis = 300))
+                        ) {
+                            StartupLoadingScreen()
                         }
                     }
                 }
