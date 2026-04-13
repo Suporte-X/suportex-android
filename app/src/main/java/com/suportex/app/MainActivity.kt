@@ -7,8 +7,12 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.IntentFilter
 import android.Manifest
+import android.app.AlertDialog
 import android.media.projection.MediaProjectionManager
 import android.app.ActivityManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.os.Build
 import android.os.Bundle
 import android.os.BatteryManager
@@ -41,6 +45,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
@@ -97,6 +102,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToLong
 
 enum class Screen {
@@ -113,6 +119,13 @@ enum class Screen {
 }
 
 private const val DEFAULT_AVERAGE_WAIT_FALLBACK_MILLIS = 90_000L
+private const val PREFS_RUNTIME_PERMISSIONS = "runtime_permissions"
+private const val KEY_INITIAL_PERMISSIONS_REQUESTED = "initial_permissions_requested"
+private const val CHAT_NOTIFICATION_CHANNEL_ID = "suportex_chat_messages"
+private const val SESSION_NOTIFICATION_CHANNEL_ID = "suportex_session_events"
+private const val ACTION_OPEN_SESSION_CHAT = "com.suportex.app.action.OPEN_SESSION_CHAT"
+private const val ACTION_OPEN_SESSION_FEEDBACK = "com.suportex.app.action.OPEN_SESSION_FEEDBACK"
+private const val EXTRA_SESSION_ID = "extra_session_id"
 
 private data class SupportFlowFlags(
     val showCreditPanelOnlyForRegisteredClients: Boolean = true,
@@ -168,6 +181,10 @@ class MainActivity : ComponentActivity() {
     private var pendingSupportStartContext: SupportStartContext? = null
     private var pendingSupportSessionId: String? = null
     private var pnvFlowInProgress = false
+    private var appInForeground = false
+    private var initialPermissionsPromptedThisLaunch = false
+    private var pendingLaunchSessionFromNotification: String? = null
+    private var pendingLaunchFeedbackSessionId: String? = null
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -640,10 +657,12 @@ class MainActivity : ComponentActivity() {
             this,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
+        val notificationsGranted = isNotificationPermissionGranted()
         val overlayEnabled = Settings.canDrawOverlays(this)
         val permissionsSummary = buildPermissionsSummary(
             accessibilityEnabled = accessibilityEnabled,
             microphoneGranted = microphoneGranted,
+            notificationsGranted = notificationsGranted,
             overlayEnabled = overlayEnabled
         )
         val health = buildDeviceHealthLabel(
@@ -670,6 +689,7 @@ class MainActivity : ComponentActivity() {
             permissionsMap = mapOf(
                 "accessibilityEnabled" to accessibilityEnabled,
                 "microphoneGranted" to microphoneGranted,
+                "notificationsGranted" to notificationsGranted,
                 "overlayEnabled" to overlayEnabled
             ),
             health = health,
@@ -702,11 +722,13 @@ class MainActivity : ComponentActivity() {
     private fun buildPermissionsSummary(
         accessibilityEnabled: Boolean,
         microphoneGranted: Boolean,
+        notificationsGranted: Boolean,
         overlayEnabled: Boolean
     ): String {
         val rows = listOf(
             "Acessibilidade: ${if (accessibilityEnabled) "ok" else "pendente"}",
             "Microfone: ${if (microphoneGranted) "ok" else "pendente"}",
+            "Notificacoes: ${if (notificationsGranted) "ok" else "pendente"}",
             "Sobreposição: ${if (overlayEnabled) "ok" else "pendente"}"
         )
         return rows.joinToString(" • ")
@@ -758,6 +780,209 @@ class MainActivity : ComponentActivity() {
         return if (alerts.isEmpty()) "Sem alertas" else alerts.joinToString(" • ")
     }
 
+    private fun isNotificationPermissionGranted(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun ensureNotificationChannel(
+        id: String,
+        name: String,
+        description: String,
+        importance: Int
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (manager.getNotificationChannel(id) != null) return
+        val channel = NotificationChannel(id, name, importance).apply {
+            this.description = description
+            enableVibration(true)
+        }
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun maybePromptInitialCriticalPermissions() {
+        if (initialPermissionsPromptedThisLaunch) return
+        initialPermissionsPromptedThisLaunch = true
+
+        val prefs = getSharedPreferences(PREFS_RUNTIME_PERMISSIONS, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, false)) return
+        prefs.edit().putBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, true).apply()
+
+        val runtimePermissions = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            runtimePermissions.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            runtimePermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (runtimePermissions.isNotEmpty()) {
+            initialRuntimePermissionsLauncher.launch(runtimePermissions.toTypedArray())
+        } else {
+            maybePromptSpecialPermissionSetup()
+        }
+    }
+
+    private fun maybePromptSpecialPermissionSetup() {
+        val overlayMissing = !Settings.canDrawOverlays(this)
+        val accessibilityMissing = !isAccessibilityServiceEnabled()
+        if (!overlayMissing && !accessibilityMissing) return
+
+        val missingLabels = buildList {
+            if (overlayMissing) add("sobreposicao")
+            if (accessibilityMissing) add("acessibilidade")
+        }
+        val message = buildString {
+            append("Para melhorar sua experiencia no atendimento, recomendamos ativar: ")
+            append(missingLabels.joinToString(" e "))
+            append(". ")
+            append("Essas permissoes ajudam no retorno automatico para avaliacao e no acesso remoto assistido.")
+        }
+
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Permissoes recomendadas")
+                .setMessage(message)
+                .setCancelable(true)
+                .setNegativeButton("Agora nao", null)
+                .setPositiveButton("Configurar") { _, _ ->
+                    if (overlayMissing) {
+                        openOverlaySettings()
+                    } else if (accessibilityMissing) {
+                        openAccessibilitySettings()
+                    }
+                }
+                .show()
+        }
+    }
+
+    private fun handleLaunchIntent(intent: Intent?) {
+        val action = intent?.action.orEmpty()
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)?.trim().orEmpty().ifBlank { null }
+        when (action) {
+            ACTION_OPEN_SESSION_CHAT -> pendingLaunchSessionFromNotification = sessionId
+            ACTION_OPEN_SESSION_FEEDBACK -> pendingLaunchFeedbackSessionId = sessionId
+        }
+    }
+
+    private fun applyPendingLaunchIntentNavigation() {
+        val feedbackSessionId = pendingLaunchFeedbackSessionId
+        if (!feedbackSessionId.isNullOrBlank()) {
+            pendingLaunchFeedbackSessionId = null
+            setEndedSessionForFeedback?.invoke(feedbackSessionId)
+            setScreenFromSocket?.invoke(Screen.SESSION_FEEDBACK)
+            return
+        }
+
+        val chatSessionId = pendingLaunchSessionFromNotification
+        if (!chatSessionId.isNullOrBlank()) {
+            pendingLaunchSessionFromNotification = null
+            setSessionIdFromSocket?.invoke(chatSessionId)
+            setScreenFromSocket?.invoke(Screen.SESSION)
+        }
+    }
+
+    private fun buildChatNotificationBody(message: Message): String {
+        return when {
+            !message.text.isNullOrBlank() -> message.text
+            !message.audioUrl.isNullOrBlank() -> "Audio recebido."
+            !message.imageUrl.isNullOrBlank() || !message.fileUrl.isNullOrBlank() -> "Imagem recebida."
+            else -> "Nova mensagem recebida."
+        }
+    }
+
+    private fun notifyIncomingChatMessage(sessionId: String, message: Message) {
+        if (appInForeground) return
+        if (!isNotificationPermissionGranted()) return
+
+        ensureNotificationChannel(
+            id = CHAT_NOTIFICATION_CHANNEL_ID,
+            name = "Mensagens do atendimento",
+            description = "Notificacoes de novas mensagens durante o suporte.",
+            importance = NotificationManager.IMPORTANCE_HIGH
+        )
+
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_CHAT
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            abs(sessionId.hashCode()),
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val title = message.fromName?.takeIf { it.isNotBlank() } ?: "Suporte X"
+        val body = buildChatNotificationBody(message)
+        val notification = NotificationCompat.Builder(this, CHAT_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.notify(2_000 + abs(sessionId.hashCode() % 900), notification)
+    }
+
+    private fun notifySessionEndedByTech(sessionId: String, reason: String?) {
+        if (!isNotificationPermissionGranted()) return
+
+        ensureNotificationChannel(
+            id = SESSION_NOTIFICATION_CHANNEL_ID,
+            name = "Atualizacoes do atendimento",
+            description = "Notificacoes sobre encerramento da sessao de suporte.",
+            importance = NotificationManager.IMPORTANCE_HIGH
+        )
+
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_FEEDBACK
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            abs(sessionId.hashCode()) + 10_000,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val body = reason?.takeIf { it.isNotBlank() } ?: "Seu atendimento foi encerrado. Toque para avaliar."
+        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Atendimento encerrado")
+            .setContentText(body)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.notify(3_000 + abs(sessionId.hashCode() % 900), notification)
+    }
+
+    private fun bringAppToForegroundForFeedback(sessionId: String) {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_FEEDBACK
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        runCatching { startActivity(launchIntent) }
+            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir tela de avaliacao automaticamente", err) }
+    }
+
     private fun handleIncomingChat(obj: JSONObject) {
         val sid = currentSessionId ?: return
         val text = obj.optString("text", "").takeIf { it.isNotBlank() }
@@ -788,6 +1013,9 @@ class MainActivity : ComponentActivity() {
         )
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching { Conn.chatRepository?.upsertIncoming(sid, message) }
+        }
+        if (message.from.equals("tech", ignoreCase = true)) {
+            notifyIncomingChatMessage(sid, message)
         }
     }
 
@@ -1045,6 +1273,12 @@ class MainActivity : ComponentActivity() {
             setEndedSessionForFeedback?.invoke(sid)
             setScreenFromSocket?.invoke(if (sid.isNullOrBlank()) Screen.HOME else Screen.SESSION_FEEDBACK)
             setSystemMessageFromLauncher?.invoke(null)
+        }
+        if (fromCommand && !sid.isNullOrBlank()) {
+            notifySessionEndedByTech(sid, reason)
+            if (!appInForeground) {
+                bringAppToForegroundForFeedback(sid)
+            }
         }
     }
 
@@ -1514,6 +1748,18 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private val initialRuntimePermissionsLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            maybePromptSpecialPermissionSetup()
+        }
+
+    private val overlayPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            if (!isAccessibilityServiceEnabled()) {
+                openAccessibilitySettings()
+            }
+        }
+
     private val attachmentPickerLauncher =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             uri?.let { handleAttachmentPick(it) }
@@ -1530,8 +1776,19 @@ class MainActivity : ComponentActivity() {
         startActivity(intent)
     }
 
+    private fun openOverlaySettings() {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            "package:$packageName".toUri()
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        overlayPermissionLauncher.launch(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleLaunchIntent(intent)
         val appBackgroundArgb = Color(0xFFF4F6F8).toArgb()
         window.statusBarColor = appBackgroundArgb
         window.navigationBarColor = appBackgroundArgb
@@ -1790,6 +2047,7 @@ class MainActivity : ComponentActivity() {
                     setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
                     setRecordingAudioFromActivity = { isRecordingAudio = it }
                     setEndedSessionForFeedback = { endedSessionId = it }
+                    applyPendingLaunchIntentNavigation()
                     startBootstrap(showAnimation = true)
                 }
 
@@ -2044,6 +2302,24 @@ class MainActivity : ComponentActivity() {
 
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        appInForeground = true
+        maybePromptInitialCriticalPermissions()
+    }
+
+    override fun onStop() {
+        appInForeground = false
+        super.onStop()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunchIntent(intent)
+        applyPendingLaunchIntentNavigation()
     }
 
     override fun onDestroy() {
