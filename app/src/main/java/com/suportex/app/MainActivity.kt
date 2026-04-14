@@ -10,6 +10,9 @@ import android.Manifest
 import android.app.AlertDialog
 import android.media.projection.MediaProjectionManager
 import android.app.ActivityManager
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -17,6 +20,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.BatteryManager
 import android.os.StatFs
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -123,6 +129,7 @@ private const val PREFS_RUNTIME_PERMISSIONS = "runtime_permissions"
 private const val KEY_INITIAL_PERMISSIONS_REQUESTED = "initial_permissions_requested"
 private const val CHAT_NOTIFICATION_CHANNEL_ID = "suportex_chat_messages"
 private const val SESSION_NOTIFICATION_CHANNEL_ID = "suportex_session_events"
+private const val CALL_NOTIFICATION_CHANNEL_ID = "suportex_call_alerts"
 private const val ACTION_OPEN_SESSION_CHAT = "com.suportex.app.action.OPEN_SESSION_CHAT"
 private const val ACTION_OPEN_SESSION_FEEDBACK = "com.suportex.app.action.OPEN_SESSION_FEEDBACK"
 private const val EXTRA_SESSION_ID = "extra_session_id"
@@ -185,6 +192,10 @@ class MainActivity : ComponentActivity() {
     private var initialPermissionsPromptedThisLaunch = false
     private var pendingLaunchSessionFromNotification: String? = null
     private var pendingLaunchFeedbackSessionId: String? = null
+    private var currentCallUiState: CallState = CallState.IDLE
+    private var currentCallDirection: CallDirection? = null
+    private var incomingCallRingtone: Ringtone? = null
+    private var incomingCallAlertActive = false
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -541,6 +552,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleCallUpdate(update: CallUiUpdate) {
+        currentCallUiState = update.state
+        currentCallDirection = update.direction
         val calling = update.state in setOf(
             CallState.OUTGOING_RINGING,
             CallState.INCOMING_RINGING,
@@ -553,6 +566,23 @@ class MainActivity : ComponentActivity() {
             setCallStateFromManager?.invoke(update.state)
             setCallDirectionFromManager?.invoke(update.direction)
         }
+
+        val incomingFromTech = update.state == CallState.INCOMING_RINGING &&
+            update.direction == CallDirection.TECH_TO_CLIENT
+        val sid = currentSessionId
+        if (incomingFromTech) {
+            if (appInForeground) {
+                cancelIncomingCallNotification(sid)
+                startIncomingCallAlert()
+            } else if (!sid.isNullOrBlank()) {
+                stopIncomingCallAlert()
+                notifyIncomingCallFromTech(sid)
+            }
+        } else {
+            stopIncomingCallAlert()
+            cancelIncomingCallNotification(sid)
+        }
+
         when (update.state) {
             CallState.DECLINED -> setSystemMessageFromLauncher?.invoke("Chamada recusada.")
             CallState.TIMEOUT -> setSystemMessageFromLauncher?.invoke("Sem resposta.")
@@ -936,6 +966,119 @@ class MainActivity : ComponentActivity() {
         manager.notify(2_000 + abs(sessionId.hashCode() % 900), notification)
     }
 
+    private fun callNotificationId(sessionId: String): Int {
+        return 4_000 + abs(sessionId.hashCode() % 900)
+    }
+
+    private fun ensureCallNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (manager.getNotificationChannel(CALL_NOTIFICATION_CHANNEL_ID) != null) return
+        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        val channel = NotificationChannel(
+            CALL_NOTIFICATION_CHANNEL_ID,
+            "Chamadas do atendimento",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Alertas de chamada recebida no suporte."
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0L, 450L, 350L, 450L, 350L)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            if (ringtoneUri != null) {
+                setSound(ringtoneUri, audioAttributes)
+            }
+        }
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun resolveDefaultVibrator(): Vibrator? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(VIBRATOR_SERVICE) as? Vibrator
+        }
+    }
+
+    private fun startIncomingCallAlert() {
+        if (incomingCallAlertActive) return
+        incomingCallAlertActive = true
+
+        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        if (ringtoneUri != null) {
+            runCatching {
+                incomingCallRingtone = RingtoneManager.getRingtone(this, ringtoneUri)
+                incomingCallRingtone?.play()
+            }
+        }
+
+        val vibrator = resolveDefaultVibrator()
+        if (vibrator?.hasVibrator() == true) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val effect = VibrationEffect.createWaveform(longArrayOf(0L, 450L, 350L, 450L, 350L), 0)
+                vibrator.vibrate(effect)
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(longArrayOf(0L, 450L, 350L, 450L, 350L), 0)
+            }
+        }
+    }
+
+    private fun stopIncomingCallAlert() {
+        if (!incomingCallAlertActive) return
+        incomingCallAlertActive = false
+
+        runCatching { incomingCallRingtone?.stop() }
+        incomingCallRingtone = null
+
+        resolveDefaultVibrator()?.cancel()
+    }
+
+    private fun notifyIncomingCallFromTech(sessionId: String) {
+        if (!isNotificationPermissionGranted()) return
+        ensureCallNotificationChannel()
+
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_CHAT
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            callNotificationId(sessionId),
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CALL_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Chamada recebida")
+            .setContentText("Suporte X está chamando você. Toque para abrir.")
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setAutoCancel(true)
+            .setOngoing(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.notify(callNotificationId(sessionId), notification)
+    }
+
+    private fun cancelIncomingCallNotification(sessionId: String?) {
+        if (sessionId.isNullOrBlank()) return
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.cancel(callNotificationId(sessionId))
+    }
+
     private fun notifySessionEndedByTech(sessionId: String, reason: String?) {
         if (!isNotificationPermissionGranted()) return
 
@@ -1266,6 +1409,8 @@ class MainActivity : ComponentActivity() {
         shareRequestFromCommand = false
         pendingSupportStartContext = null
         pendingSupportSessionId = null
+        stopIncomingCallAlert()
+        cancelIncomingCallNotification(sid)
         finalizeSession()
         runOnUiThread {
             setRequestIdFromSocket?.invoke(null)
@@ -2308,9 +2453,21 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         appInForeground = true
         maybePromptInitialCriticalPermissions()
+        val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
+            currentCallDirection == CallDirection.TECH_TO_CLIENT
+        if (incomingFromTech) {
+            cancelIncomingCallNotification(currentSessionId)
+            startIncomingCallAlert()
+        }
     }
 
     override fun onStop() {
+        val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
+            currentCallDirection == CallDirection.TECH_TO_CLIENT
+        if (incomingFromTech && !currentSessionId.isNullOrBlank()) {
+            notifyIncomingCallFromTech(currentSessionId!!)
+        }
+        stopIncomingCallAlert()
         appInForeground = false
         super.onStop()
     }
@@ -2323,6 +2480,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        stopIncomingCallAlert()
         super.onDestroy()
         runCatching {
             mediaRecorder?.apply {
