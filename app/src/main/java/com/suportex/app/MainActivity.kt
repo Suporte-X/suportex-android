@@ -36,7 +36,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +47,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.painterResource
@@ -2768,26 +2771,81 @@ private fun WaitingScreen(
     textMuted: Color,
     averageWaitLabel: String
 ) {
-    Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+    var showWaitingHelp by rememberSaveable { mutableStateOf(false) }
+    val dismissHelp: () -> Unit = { if (showWaitingHelp) showWaitingHelp = false }
+    val outsideClickInteraction = remember { MutableInteractionSource() }
+    val helpBubbleInteraction = remember { MutableInteractionSource() }
+
+    BackHandler(enabled = showWaitingHelp) {
+        showWaitingHelp = false
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clickable(
+                interactionSource = outsideClickInteraction,
+                indication = null
+            ) { dismissHelp() }
+            .padding(24.dp),
+        contentAlignment = Alignment.TopCenter
     ) {
-        Spacer(Modifier.height(80.dp))
-        CircularProgressIndicator()
-        Spacer(Modifier.height(16.dp))
-        Text("Acionando técnico, aguarde...", fontSize = 18.sp)
-        Text(averageWaitLabel, color = textMuted)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Você pode usar o celular normalmente enquanto aguarda. A solicitação só para quando você tocar em CANCELAR SOLICITAÇÃO.",
-            color = textMuted,
-            fontSize = 13.sp
-        )
-        Spacer(Modifier.height(24.dp))
-        Button(
-            onClick = onCancel,
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-        ) { Text("CANCELAR SOLICITAÇÃO", color = Color.White) }
+        Column(
+            Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(80.dp))
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Text("Acionando técnico, aguarde...", fontSize = 18.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "?",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .clickable { showWaitingHelp = !showWaitingHelp }
+                        .wrapContentSize(Alignment.Center)
+                )
+            }
+            Text(averageWaitLabel, color = textMuted)
+
+            AnimatedVisibility(visible = showWaitingHelp) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
+                        .clickable(
+                            interactionSource = helpBubbleInteraction,
+                            indication = null
+                        ) {},
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.White.copy(alpha = 0.92f),
+                    tonalElevation = 1.dp,
+                    shadowElevation = 0.dp
+                ) {
+                    Text(
+                        text = "Você pode usar o celular normalmente enquanto aguarda. A solicitação só para quando você tocar em CANCELAR SOLICITAÇÃO.\nLembre-se de não usar o botão voltar do seu dispositivo para isso. Use as opções Home ou Recentes.",
+                        color = textMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+            Button(
+                onClick = onCancel,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+            ) { Text("CANCELAR SOLICITAÇÃO", color = Color.White) }
+        }
     }
 }
