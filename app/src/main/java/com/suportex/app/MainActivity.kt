@@ -2777,6 +2777,12 @@ private fun WaitingScreen(
         Spacer(Modifier.height(16.dp))
         Text("Acionando técnico, aguarde...", fontSize = 18.sp)
         Text(averageWaitLabel, color = textMuted)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Você pode usar o celular normalmente enquanto aguarda. A solicitação só para quando você tocar em CANCELAR SOLICITAÇÃO.",
+            color = textMuted,
+            fontSize = 13.sp
+        )
         Spacer(Modifier.height(24.dp))
         Button(
             onClick = onCancel,
