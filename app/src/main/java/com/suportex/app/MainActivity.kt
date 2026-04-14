@@ -571,11 +571,10 @@ class MainActivity : ComponentActivity() {
             update.direction == CallDirection.TECH_TO_CLIENT
         val sid = currentSessionId
         if (incomingFromTech) {
+            startIncomingCallAlert()
             if (appInForeground) {
                 cancelIncomingCallNotification(sid)
-                startIncomingCallAlert()
             } else if (!sid.isNullOrBlank()) {
-                stopIncomingCallAlert()
                 notifyIncomingCallFromTech(sid)
             }
         } else {
@@ -1064,6 +1063,7 @@ class MainActivity : ComponentActivity() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
@@ -2466,8 +2466,9 @@ class MainActivity : ComponentActivity() {
             currentCallDirection == CallDirection.TECH_TO_CLIENT
         if (incomingFromTech && !currentSessionId.isNullOrBlank()) {
             notifyIncomingCallFromTech(currentSessionId!!)
+        } else {
+            stopIncomingCallAlert()
         }
-        stopIncomingCallAlert()
         appInForeground = false
         super.onStop()
     }
