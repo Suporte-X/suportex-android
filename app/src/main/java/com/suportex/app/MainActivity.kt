@@ -1082,6 +1082,36 @@ class MainActivity : ComponentActivity() {
         manager.cancel(callNotificationId(sessionId))
     }
 
+    private fun normalizeSessionEndReason(reason: String?): String {
+        val raw = reason?.trim().orEmpty()
+        if (raw.isBlank()) return "Atendimento encerrado."
+        val normalized = raw.lowercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+        return when (normalized) {
+            "tech_ended",
+            "session_end",
+            "end",
+            "finish_end",
+            "finished_end",
+            "peer_ended",
+            "peer_left",
+            "client_ended",
+            "client_left",
+            "support_ended" -> "Atendimento encerrado."
+            else -> raw
+        }
+    }
+
+    private fun buildSessionEndedNotificationBody(reason: String?): String {
+        val normalizedReason = normalizeSessionEndReason(reason)
+        return if (normalizedReason == "Atendimento encerrado.") {
+            "Seu atendimento foi encerrado. Toque para avaliar."
+        } else {
+            normalizedReason
+        }
+    }
+
     private fun notifySessionEndedByTech(sessionId: String, reason: String?) {
         if (!isNotificationPermissionGranted()) return
 
@@ -1104,7 +1134,7 @@ class MainActivity : ComponentActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val body = reason?.takeIf { it.isNotBlank() } ?: "Seu atendimento foi encerrado. Toque para avaliar."
+        val body = buildSessionEndedNotificationBody(reason)
         val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Atendimento encerrado")
@@ -1198,7 +1228,7 @@ class MainActivity : ComponentActivity() {
             // A chamada agora e dirigida pelo VoiceCallManager (Firestore/WebRTC),
             // evitando conflito de estado com comandos legados.
             "call_start", "call_end" -> Unit
-            "session_end", "end" -> handleSessionEnded(reason = obj.optString("reason", "Atendimento encerrado."))
+            "session_end", "end" -> handleSessionEnded(reason = normalizeSessionEndReason(obj.optString("reason", "")))
         }
     }
 
@@ -1369,11 +1399,12 @@ class MainActivity : ComponentActivity() {
             // Evita sobrescrever a tela de feedback quando chegam eventos duplicados de encerramento.
             return
         }
+        val normalizedReason = normalizeSessionEndReason(reason)
         val origin = if (fromCommand) "tech" else "client"
         if (!fromCommand) sendCommand("end")
 
         sid?.let {
-            logSessionEvent("end", origin = origin, extras = mapOf("reason" to reason))
+            logSessionEvent("end", origin = origin, extras = mapOf("reason" to normalizedReason))
             lifecycleScope.launch(Dispatchers.IO) {
                 runCatching { sessionRepository.markSessionClosed(it) }
                 runCatching {
@@ -1382,10 +1413,10 @@ class MainActivity : ComponentActivity() {
                         realtimeSessionId = it,
                         techId = null,
                         techName = Conn.techName,
-                        problemSummary = reason,
+                        problemSummary = normalizedReason,
                         solutionSummary = null,
                         internalNotes = "Encerrado via app Android ($origin)",
-                        reportSummary = reason
+                        reportSummary = normalizedReason
                     )
                 }
             }
@@ -1423,7 +1454,7 @@ class MainActivity : ComponentActivity() {
             setSystemMessageFromLauncher?.invoke(null)
         }
         if (fromCommand && !sid.isNullOrBlank()) {
-            notifySessionEndedByTech(sid, reason)
+            notifySessionEndedByTech(sid, normalizedReason)
             if (!appInForeground) {
                 bringAppToForegroundForFeedback(sid)
             }
@@ -1579,8 +1610,8 @@ class MainActivity : ComponentActivity() {
         }
 
         socket.on("session:ended") { args ->
-            val reason = (args.getOrNull(0) as? JSONObject)?.optString("reason")
-            handleSessionEnded(reason = reason ?: "Atendimento encerrado.")
+            val reason = normalizeSessionEndReason((args.getOrNull(0) as? JSONObject)?.optString("reason"))
+            handleSessionEnded(reason = reason)
         }
 
         socket.connect()
