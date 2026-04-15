@@ -23,3 +23,6 @@ Thumbs.db
 
 # Codex local memory (do not commit)
 .codex-memory/
+
+# Local helper scripts (do not commit)
+tools/start_dual_monitor.ps1
