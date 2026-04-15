@@ -135,7 +135,12 @@ private const val SESSION_NOTIFICATION_CHANNEL_ID = "suportex_session_events"
 private const val CALL_NOTIFICATION_CHANNEL_ID = "suportex_call_alerts"
 private const val ACTION_OPEN_SESSION_CHAT = "com.suportex.app.action.OPEN_SESSION_CHAT"
 private const val ACTION_OPEN_SESSION_FEEDBACK = "com.suportex.app.action.OPEN_SESSION_FEEDBACK"
+private const val ACTION_WAITING_SUPPORT_ACCEPTED = "com.suportex.app.action.WAITING_SUPPORT_ACCEPTED"
 private const val EXTRA_SESSION_ID = "extra_session_id"
+private const val EXTRA_TECH_NAME = "extra_tech_name"
+private const val EXTRA_LOCAL_SUPPORT_SESSION_ID = "extra_local_support_session_id"
+private const val PREFS_WAITING_SUPPORT = "waiting_support_runtime"
+private const val KEY_PENDING_SUPPORT_SESSION_ID = "pending_support_session_id"
 private const val WAITING_SESSION_RECOVERY_INTERVAL_MS = 4_000L
 
 private data class SupportFlowFlags(
@@ -198,6 +203,9 @@ class MainActivity : ComponentActivity() {
     private var initialPermissionsPromptedThisLaunch = false
     private var pendingLaunchSessionFromNotification: String? = null
     private var pendingLaunchFeedbackSessionId: String? = null
+    private var pendingLaunchAcceptedSessionId: String? = null
+    private var pendingLaunchAcceptedTechName: String? = null
+    private var pendingLaunchAcceptedLocalSupportSessionId: String? = null
     private var currentCallUiState: CallState = CallState.IDLE
     private var currentCallDirection: CallDirection? = null
     private var incomingCallRingtone: Ringtone? = null
@@ -230,6 +238,55 @@ class MainActivity : ComponentActivity() {
         val cb = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cb.setPrimaryClip(ClipData.newPlainText(label, text))
         Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun readPendingSupportSessionFromPrefs(): String? {
+        return getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
+            .getString(KEY_PENDING_SUPPORT_SESSION_ID, null)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun writePendingSupportSessionToPrefs(localSupportSessionId: String?) {
+        val prefs = getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
+        if (localSupportSessionId.isNullOrBlank()) {
+            prefs.edit().remove(KEY_PENDING_SUPPORT_SESSION_ID).apply()
+        } else {
+            prefs.edit().putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId).apply()
+        }
+    }
+
+    private fun startWaitingSupportForegroundService(localSupportSessionId: String) {
+        val intent = Intent(this, WaitingSupportMonitorService::class.java).apply {
+            action = WaitingSupportMonitorService.ACTION_START_MONITOR
+            putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, localSupportSessionId)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { startForegroundService(intent) }
+                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar servico de fila", err) }
+        } else {
+            runCatching { startService(intent) }
+                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar servico de fila", err) }
+        }
+    }
+
+    private fun stopWaitingSupportForegroundService() {
+        runCatching {
+            stopService(Intent(this, WaitingSupportMonitorService::class.java))
+        }.onFailure { err ->
+            Log.w("SXS/Main", "Falha ao parar servico de fila", err)
+        }
+    }
+
+    private fun setPendingSupportSession(localSupportSessionId: String?) {
+        val normalized = localSupportSessionId?.trim()?.takeIf { it.isNotBlank() }
+        pendingSupportSessionId = normalized
+        writePendingSupportSessionToPrefs(normalized)
+        if (normalized.isNullOrBlank()) {
+            stopWaitingSupportForegroundService()
+        } else {
+            startWaitingSupportForegroundService(normalized)
+        }
     }
 
     private fun loadSupportQueueWaitStats(onResult: (SupportQueueWaitStats) -> Unit) {
@@ -868,11 +925,26 @@ class MainActivity : ComponentActivity() {
         when (action) {
             ACTION_OPEN_SESSION_CHAT -> pendingLaunchSessionFromNotification = sessionId
             ACTION_OPEN_SESSION_FEEDBACK -> pendingLaunchFeedbackSessionId = sessionId
+            ACTION_WAITING_SUPPORT_ACCEPTED -> {
+                pendingLaunchAcceptedSessionId = sessionId
+                pendingLaunchAcceptedTechName = intent?.getStringExtra(EXTRA_TECH_NAME)
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                pendingLaunchAcceptedLocalSupportSessionId = intent?.getStringExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+            }
         }
-        if (action == ACTION_OPEN_SESSION_CHAT || action == ACTION_OPEN_SESSION_FEEDBACK) {
+        if (
+            action == ACTION_OPEN_SESSION_CHAT ||
+            action == ACTION_OPEN_SESSION_FEEDBACK ||
+            action == ACTION_WAITING_SUPPORT_ACCEPTED
+        ) {
             // Evita reprocessar a mesma acao em recriacoes da Activity (ex.: rotacao de tela).
             intent?.action = Intent.ACTION_MAIN
             intent?.removeExtra(EXTRA_SESSION_ID)
+            intent?.removeExtra(EXTRA_TECH_NAME)
+            intent?.removeExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
         }
     }
 
@@ -882,6 +954,24 @@ class MainActivity : ComponentActivity() {
             pendingLaunchFeedbackSessionId = null
             setEndedSessionForFeedback?.invoke(feedbackSessionId)
             setScreenFromSocket?.invoke(Screen.SESSION_FEEDBACK)
+            return
+        }
+
+        val acceptedSessionId = pendingLaunchAcceptedSessionId
+        if (!acceptedSessionId.isNullOrBlank()) {
+            pendingLaunchAcceptedSessionId = null
+            val techName = pendingLaunchAcceptedTechName
+            pendingLaunchAcceptedTechName = null
+            val localSupportSessionId = pendingLaunchAcceptedLocalSupportSessionId
+            pendingLaunchAcceptedLocalSupportSessionId = null
+            if (!localSupportSessionId.isNullOrBlank()) {
+                setPendingSupportSession(localSupportSessionId)
+            }
+            handleSupportAccepted(
+                sessionId = acceptedSessionId,
+                techName = techName,
+                source = "waiting_service_launch_intent"
+            )
             return
         }
 
@@ -1278,7 +1368,7 @@ class MainActivity : ComponentActivity() {
 
         val localSupportSessionId = pendingSupportSessionId
         activeSupportRequestId = null
-        pendingSupportSessionId = null
+        setPendingSupportSession(null)
         pendingSupportStartContext = null
         stopWaitingSessionRecovery()
 
@@ -1614,7 +1704,7 @@ class MainActivity : ComponentActivity() {
         shareRequestFromCommand = false
         activeSupportRequestId = null
         pendingSupportStartContext = null
-        pendingSupportSessionId = null
+        setPendingSupportSession(null)
         stopWaitingSessionRecovery()
         stopIncomingCallAlert()
         cancelIncomingCallNotification(sid)
@@ -1682,7 +1772,7 @@ class MainActivity : ComponentActivity() {
 
             val localSupportId = pendingSupportSessionId
             activeSupportRequestId = null
-            pendingSupportSessionId = null
+            setPendingSupportSession(null)
             pendingSupportStartContext = null
             stopWaitingSessionRecovery()
             if (!localSupportId.isNullOrBlank()) {
@@ -1831,6 +1921,7 @@ class MainActivity : ComponentActivity() {
     ) {
         lifecycleScope.launch(Dispatchers.IO) {
             activeSupportRequestId = null
+            setPendingSupportSession(null)
             stopWaitingSessionRecovery()
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
@@ -1846,7 +1937,7 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
 
-            pendingSupportSessionId = runCatching {
+            val localSupportSessionId = runCatching {
                 clientSupportRepository.registerSupportRequest(
                     startContext = startContext.copy(phone = effectivePhone),
                     clientName = clientName,
@@ -1857,6 +1948,7 @@ class MainActivity : ComponentActivity() {
                     androidVersion = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
                 )
             }.getOrNull()
+            setPendingSupportSession(localSupportSessionId)
             startWaitingSessionRecovery()
 
             val payload = JSONObject().apply {
@@ -1977,7 +2069,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         activeSupportRequestId = null
-        pendingSupportSessionId = null
+        setPendingSupportSession(null)
         pendingSupportStartContext = null
         stopWaitingSessionRecovery()
 
@@ -2133,6 +2225,10 @@ class MainActivity : ComponentActivity() {
         )
 
         connectSocket() // conecta o Socket.IO assim que abrir o app
+        readPendingSupportSessionFromPrefs()?.let { localSupportSessionId ->
+            setPendingSupportSession(localSupportSessionId)
+            startWaitingSessionRecovery()
+        }
 
         setContent {
             val brandPrimary = Color(0xFFFFCB19)
@@ -2154,7 +2250,11 @@ class MainActivity : ComponentActivity() {
                 ),
                 typography = Typography()
             ) {
-                var current by remember { mutableStateOf(Screen.HOME) }
+                var current by remember {
+                    mutableStateOf(
+                        if (pendingSupportSessionId.isNullOrBlank()) Screen.HOME else Screen.WAITING
+                    )
+                }
 
                 var requestId by remember { mutableStateOf<String?>(null) }
                 var sessionId by remember { mutableStateOf<String?>(null) }
@@ -2334,7 +2434,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                                 activeSupportRequestId = null
-                                pendingSupportSessionId = null
+                                setPendingSupportSession(null)
                                 pendingSupportStartContext = null
                                 stopWaitingSessionRecovery()
                             }
@@ -2534,7 +2634,7 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                     activeSupportRequestId = null
-                                    pendingSupportSessionId = null
+                                    setPendingSupportSession(null)
                                     pendingSupportStartContext = null
                                     stopWaitingSessionRecovery()
                                 }

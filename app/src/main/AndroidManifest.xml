@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"
         tools:ignore="ForegroundServicesPermission,ForegroundServicesPolicy" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:allowBackup="false"
@@ -37,6 +38,11 @@
             android:name="com.suportex.app.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <service
+            android:name="com.suportex.app.WaitingSupportMonitorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <service
             android:name="com.suportex.app.remote.RemoteControlService"
