@@ -278,15 +278,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun syncWaitingSupportForegroundService() {
+        val localSupportSessionId = pendingSupportSessionId
+        if (localSupportSessionId.isNullOrBlank()) {
+            stopWaitingSupportForegroundService()
+            return
+        }
+        if (appInForeground) {
+            // Com o app aberto, evitamos notificacao persistente da fila.
+            stopWaitingSupportForegroundService()
+            return
+        }
+        startWaitingSupportForegroundService(localSupportSessionId)
+    }
+
     private fun setPendingSupportSession(localSupportSessionId: String?) {
         val normalized = localSupportSessionId?.trim()?.takeIf { it.isNotBlank() }
         pendingSupportSessionId = normalized
         writePendingSupportSessionToPrefs(normalized)
-        if (normalized.isNullOrBlank()) {
-            stopWaitingSupportForegroundService()
-        } else {
-            startWaitingSupportForegroundService(normalized)
-        }
+        syncWaitingSupportForegroundService()
     }
 
     private fun loadSupportQueueWaitStats(onResult: (SupportQueueWaitStats) -> Unit) {
@@ -1716,7 +1726,7 @@ class MainActivity : ComponentActivity() {
             setScreenFromSocket?.invoke(if (sid.isNullOrBlank()) Screen.HOME else Screen.SESSION_FEEDBACK)
             setSystemMessageFromLauncher?.invoke(null)
         }
-        if (fromCommand && !sid.isNullOrBlank()) {
+        if (fromCommand && !sid.isNullOrBlank() && !appInForeground) {
             notifySessionEndedByTech(sid, normalizedReason)
             bringAppToForegroundForFeedback(sid)
         }
@@ -2731,6 +2741,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         appInForeground = true
+        syncWaitingSupportForegroundService()
         maybePromptInitialCriticalPermissions()
         val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
             currentCallDirection == CallDirection.TECH_TO_CLIENT
@@ -2749,6 +2760,7 @@ class MainActivity : ComponentActivity() {
             stopIncomingCallAlert()
         }
         appInForeground = false
+        syncWaitingSupportForegroundService()
         super.onStop()
     }
 
