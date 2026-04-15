@@ -136,6 +136,7 @@ private const val CALL_NOTIFICATION_CHANNEL_ID = "suportex_call_alerts"
 private const val ACTION_OPEN_SESSION_CHAT = "com.suportex.app.action.OPEN_SESSION_CHAT"
 private const val ACTION_OPEN_SESSION_FEEDBACK = "com.suportex.app.action.OPEN_SESSION_FEEDBACK"
 private const val EXTRA_SESSION_ID = "extra_session_id"
+private const val WAITING_SESSION_RECOVERY_INTERVAL_MS = 4_000L
 
 private data class SupportFlowFlags(
     val showCreditPanelOnlyForRegisteredClients: Boolean = true,
@@ -188,8 +189,10 @@ class MainActivity : ComponentActivity() {
     private var pendingAudioAction: (() -> Unit)? = null
     private var mediaRecorder: MediaRecorder? = null
     private var audioTempFile: File? = null
+    private var activeSupportRequestId: String? = null
     private var pendingSupportStartContext: SupportStartContext? = null
     private var pendingSupportSessionId: String? = null
+    private var waitingSessionRecoveryJob: Job? = null
     private var pnvFlowInProgress = false
     private var appInForeground = false
     private var initialPermissionsPromptedThisLaunch = false
@@ -1164,6 +1167,157 @@ class MainActivity : ComponentActivity() {
             .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir tela de avaliacao automaticamente", err) }
     }
 
+    private fun bringAppToForegroundForSession(sessionId: String) {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_CHAT
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        runCatching { startActivity(launchIntent) }
+            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir sessao automaticamente", err) }
+    }
+
+    private fun notifySupportAcceptedByTech(sessionId: String, techName: String?) {
+        if (!isNotificationPermissionGranted()) return
+
+        ensureNotificationChannel(
+            id = SESSION_NOTIFICATION_CHANNEL_ID,
+            name = "Atualizacoes do atendimento",
+            description = "Notificacoes sobre o inicio e encerramento da sessao de suporte.",
+            importance = NotificationManager.IMPORTANCE_HIGH
+        )
+
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_OPEN_SESSION_CHAT
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            abs(sessionId.hashCode()) + 8_000,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
+        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Atendimento iniciado")
+            .setContentText("$techLabel iniciou seu atendimento. Abrindo o Suporte X...")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        manager.notify(3_500 + abs(sessionId.hashCode() % 900), notification)
+    }
+
+    private fun stopWaitingSessionRecovery() {
+        waitingSessionRecoveryJob?.cancel()
+        waitingSessionRecoveryJob = null
+    }
+
+    private fun startWaitingSessionRecovery() {
+        if (waitingSessionRecoveryJob?.isActive == true) return
+        waitingSessionRecoveryJob = lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val localSupportSessionId = pendingSupportSessionId
+                if (localSupportSessionId.isNullOrBlank() || !currentSessionId.isNullOrBlank()) break
+
+                val recovered = runCatching {
+                    clientSupportRepository.findActiveRealtimeSession(localSupportSessionId)
+                }.getOrNull()
+
+                if (recovered?.sessionId?.isNotBlank() == true) {
+                    runOnUiThread {
+                        handleSupportAccepted(
+                            sessionId = recovered.sessionId,
+                            techName = recovered.techName,
+                            source = "firestore_recovery"
+                        )
+                    }
+                    break
+                }
+
+                delay(WAITING_SESSION_RECOVERY_INTERVAL_MS)
+            }
+            waitingSessionRecoveryJob = null
+        }
+    }
+
+    private fun handleSupportAccepted(sessionId: String, techName: String?, source: String) {
+        val sid = sessionId.trim()
+        if (sid.isBlank()) return
+        val resolvedTechName = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
+
+        if (currentSessionId == sid) {
+            Conn.techName = resolvedTechName
+            runOnUiThread {
+                setTechNameFromSocket?.invoke(resolvedTechName)
+                setRequestIdFromSocket?.invoke(null)
+                setSessionIdFromSocket?.invoke(sid)
+                setScreenFromSocket?.invoke(Screen.SESSION)
+            }
+            if (!appInForeground) {
+                bringAppToForegroundForSession(sid)
+            }
+            return
+        }
+
+        val localSupportSessionId = pendingSupportSessionId
+        activeSupportRequestId = null
+        pendingSupportSessionId = null
+        pendingSupportStartContext = null
+        stopWaitingSessionRecovery()
+
+        Conn.sessionId = sid
+        Conn.techName = resolvedTechName
+        runOnUiThread { setTechNameFromSocket?.invoke(resolvedTechName) }
+        currentSessionId = sid
+        remoteConsentAcceptedForCurrentSession = false
+        resetSessionState()
+        voiceCallManager.bindSession(sid)
+        registerSessionStart(sid, resolvedTechName)
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                clientSupportRepository.attachRealtimeSession(
+                    localSupportSessionId = localSupportSessionId,
+                    realtimeSessionId = sid,
+                    techName = resolvedTechName
+                )
+            }.onFailure { err ->
+                Log.w("SXS/Main", "Falha ao vincular sessao realtime ($source)", err)
+            }
+        }
+        pushSessionState()
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val joinToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
+            val joinPayload = JSONObject().apply {
+                put("sessionId", sid)
+                put("role", "client")
+                if (joinToken.isNotBlank()) put("idToken", joinToken)
+            }
+            socket.emit("session:join", joinPayload)
+            socket.emit("join", joinPayload)
+        }
+
+        startTelemetryLoop()
+        runOnUiThread {
+            setRequestIdFromSocket?.invoke(null)
+            setSessionIdFromSocket?.invoke(sid)
+            setScreenFromSocket?.invoke(Screen.SESSION)
+        }
+
+        if (!appInForeground) {
+            notifySupportAcceptedByTech(sid, resolvedTechName)
+            bringAppToForegroundForSession(sid)
+        }
+    }
+
     private fun handleIncomingChat(obj: JSONObject) {
         val sid = currentSessionId ?: return
         val text = obj.optString("text", "").takeIf { it.isNotBlank() }
@@ -1363,6 +1517,8 @@ class MainActivity : ComponentActivity() {
     private fun finalizeSession() {
         stopTelemetryLoop()
         voiceCallManager.release()
+        activeSupportRequestId = null
+        stopWaitingSessionRecovery()
         resetSessionState()
         currentSessionId = null
         remoteConsentAcceptedForCurrentSession = false
@@ -1446,8 +1602,10 @@ class MainActivity : ComponentActivity() {
         }
 
         shareRequestFromCommand = false
+        activeSupportRequestId = null
         pendingSupportStartContext = null
         pendingSupportSessionId = null
+        stopWaitingSessionRecovery()
         stopIncomingCallAlert()
         cancelIncomingCallNotification(sid)
         finalizeSession()
@@ -1460,9 +1618,7 @@ class MainActivity : ComponentActivity() {
         }
         if (fromCommand && !sid.isNullOrBlank()) {
             notifySessionEndedByTech(sid, normalizedReason)
-            if (!appInForeground) {
-                bringAppToForegroundForFeedback(sid)
-            }
+            bringAppToForegroundForFeedback(sid)
         }
     }
 
@@ -1500,6 +1656,8 @@ class MainActivity : ComponentActivity() {
             val any = args.getOrNull(0) ?: return@on
             val data = (any as? JSONObject) ?: return@on
             val reqId = data.optString("requestId", "").takeIf { it.isNotBlank() }
+            activeSupportRequestId = reqId
+            startWaitingSessionRecovery()
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
 
@@ -1513,8 +1671,10 @@ class MainActivity : ComponentActivity() {
             }
 
             val localSupportId = pendingSupportSessionId
+            activeSupportRequestId = null
             pendingSupportSessionId = null
             pendingSupportStartContext = null
+            stopWaitingSessionRecovery()
             if (!localSupportId.isNullOrBlank()) {
                 lifecycleScope.launch(Dispatchers.IO) {
                     runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
@@ -1535,42 +1695,22 @@ class MainActivity : ComponentActivity() {
             val sid = data.optString("sessionId", "")
             val tname = data.optString("techName", "Tecnico")
             if (sid.isBlank()) return@on
+            handleSupportAccepted(sessionId = sid, techName = tname, source = "socket")
+        }
 
-            Conn.sessionId = sid
-            Conn.techName = tname
-            runOnUiThread { setTechNameFromSocket?.invoke(tname.ifBlank { "T\u00e9cnico" }) }
-            currentSessionId = sid
-            remoteConsentAcceptedForCurrentSession = false
-            resetSessionState()
-            voiceCallManager.bindSession(sid)
-            registerSessionStart(sid, tname)
-            lifecycleScope.launch(Dispatchers.IO) {
-                runCatching {
-                    clientSupportRepository.attachRealtimeSession(
-                        localSupportSessionId = pendingSupportSessionId,
-                        realtimeSessionId = sid,
-                        techName = tname
-                    )
-                }
-            }
-            pushSessionState()
+        socket.on("queue:updated") { args ->
+            val data = args.getOrNull(0) as? JSONObject ?: return@on
+            val state = data.optString("state", "").trim().lowercase()
+            if (state != "accepted") return@on
 
-            lifecycleScope.launch(Dispatchers.IO) {
-                val joinToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
-                val joinPayload = JSONObject().apply {
-                    put("sessionId", sid)
-                    put("role", "client")
-                    if (joinToken.isNotBlank()) put("idToken", joinToken)
-                }
-                socket.emit("session:join", joinPayload)
-                socket.emit("join", joinPayload)
-            }
+            val requestId = data.optString("requestId", "").trim()
+            val trackedRequestId = activeSupportRequestId?.trim().orEmpty()
+            if (requestId.isBlank() || trackedRequestId.isBlank() || requestId != trackedRequestId) return@on
 
-            startTelemetryLoop()
-            runOnUiThread {
-                setSessionIdFromSocket?.invoke(sid)
-                setScreenFromSocket?.invoke(Screen.SESSION)
-            }
+            val sid = data.optString("sessionId", "").trim()
+            if (sid.isBlank()) return@on
+            val tname = data.optString("techName", "Tecnico")
+            handleSupportAccepted(sessionId = sid, techName = tname, source = "queue_updated")
         }
 
         socket.on("client:verification:trigger") { args ->
@@ -1680,6 +1820,8 @@ class MainActivity : ComponentActivity() {
         clientName: String?
     ) {
         lifecycleScope.launch(Dispatchers.IO) {
+            activeSupportRequestId = null
+            stopWaitingSessionRecovery()
             val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
             val verifiedPhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
@@ -1705,6 +1847,7 @@ class MainActivity : ComponentActivity() {
                     androidVersion = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
                 )
             }.getOrNull()
+            startWaitingSessionRecovery()
 
             val payload = JSONObject().apply {
                 put("clientName", clientName ?: "Cliente em atendimento")
@@ -1823,8 +1966,10 @@ class MainActivity : ComponentActivity() {
                 runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
             }
         }
+        activeSupportRequestId = null
         pendingSupportSessionId = null
         pendingSupportStartContext = null
+        stopWaitingSessionRecovery()
 
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
@@ -2197,8 +2342,10 @@ class MainActivity : ComponentActivity() {
                                         runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
                                     }
                                 }
+                                activeSupportRequestId = null
                                 pendingSupportSessionId = null
                                 pendingSupportStartContext = null
+                                stopWaitingSessionRecovery()
                             }
                             requestId = null
                             sessionId = null
@@ -2395,8 +2542,10 @@ class MainActivity : ComponentActivity() {
                                             runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
                                         }
                                     }
+                                    activeSupportRequestId = null
                                     pendingSupportSessionId = null
                                     pendingSupportStartContext = null
+                                    stopWaitingSessionRecovery()
                                 }
                                 requestId = null
                                 sessionId = null
@@ -2522,6 +2671,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         stopIncomingCallAlert()
         super.onDestroy()
+        stopWaitingSessionRecovery()
         runCatching {
             mediaRecorder?.apply {
                 reset()

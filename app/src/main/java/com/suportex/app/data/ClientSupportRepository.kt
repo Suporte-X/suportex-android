@@ -37,12 +37,18 @@ class ClientSupportRepository(
         val averageWaitMillis: Long?
     )
 
+    data class ActiveRealtimeSession(
+        val sessionId: String,
+        val techName: String?
+    )
+
     private val clients = db.collection("clients")
     private val clientProfiles = db.collection("client_profiles")
     private val clientAppLinks = db.collection("client_app_links")
     private val clientVerifications = db.collection("client_verifications")
     private val pnvRequests = db.collection("pnv_requests")
     private val supportSessions = db.collection("support_sessions")
+    private val sessions = db.collection("sessions")
     private val supportReports = db.collection("support_reports")
     private val creditPackages = db.collection("credit_packages")
     private val creditOrders = db.collection("credit_orders")
@@ -343,6 +349,68 @@ class ClientSupportRepository(
             true
         }.await()
         return true
+    }
+
+    suspend fun findActiveRealtimeSession(localSupportSessionId: String?): ActiveRealtimeSession? {
+        val uid = authRepository.ensureAnonAuth().trim()
+        if (uid.isBlank()) return null
+
+        val normalizedLocalSupportSessionId = localSupportSessionId?.trim().orEmpty()
+        val candidates = mutableListOf<DocumentSnapshot>()
+
+        if (normalizedLocalSupportSessionId.isNotBlank()) {
+            val byLocalSupportSession = runCatching {
+                sessions
+                    .whereEqualTo("clientUid", uid)
+                    .whereEqualTo("supportSessionId", normalizedLocalSupportSessionId)
+                    .whereEqualTo("status", "active")
+                    .limit(3)
+                    .get()
+                    .await()
+            }.getOrNull()
+            if (byLocalSupportSession != null) {
+                candidates += byLocalSupportSession.documents
+            }
+        }
+
+        val byClientUid = runCatching {
+            sessions
+                .whereEqualTo("clientUid", uid)
+                .whereEqualTo("status", "active")
+                .limit(8)
+                .get()
+                .await()
+        }.getOrNull()
+        if (byClientUid != null) {
+            candidates += byClientUid.documents
+        }
+
+        val best = candidates
+            .asSequence()
+            .filter { it.exists() }
+            .maxByOrNull { doc ->
+                doc.getLong("acceptedAt")
+                    ?: doc.getLong("updatedAt")
+                    ?: doc.getLong("createdAt")
+                    ?: 0L
+            } ?: return null
+
+        val sessionId = best.getString("sessionId")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: best.id.trim().takeIf { it.isNotBlank() }
+            ?: return null
+
+        val tech = best.get("tech") as? Map<*, *>
+        val techName = best.getString("techName")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: (tech?.get("name") as? String)?.trim()?.takeIf { it.isNotBlank() }
+
+        return ActiveRealtimeSession(
+            sessionId = sessionId,
+            techName = techName
+        )
     }
 
     suspend fun loadSupportQueueWaitStats(): SupportQueueWaitStats {
