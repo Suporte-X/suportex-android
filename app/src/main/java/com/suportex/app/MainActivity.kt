@@ -1130,51 +1130,97 @@ class MainActivity : ComponentActivity() {
             importance = NotificationManager.IMPORTANCE_HIGH
         )
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_FEEDBACK
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            abs(sessionId.hashCode()) + 10_000,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pendingIntent = buildSessionLaunchPendingIntent(
+            action = ACTION_OPEN_SESSION_FEEDBACK,
+            sessionId = sessionId,
+            requestCode = abs(sessionId.hashCode()) + 10_000
         )
 
         val body = buildSessionEndedNotificationBody(reason)
-        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+        val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
+        val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Atendimento encerrado")
             .setContentText(body)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setContentIntent(pendingIntent)
-            .build()
+        if (canUseFullscreen) {
+            notificationBuilder.setFullScreenIntent(pendingIntent, true)
+        }
+        val notification = notificationBuilder.build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
         manager.notify(3_000 + abs(sessionId.hashCode() % 900), notification)
     }
 
-    private fun bringAppToForegroundForFeedback(sessionId: String) {
+    private fun canUseFullScreenIntent(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        val manager = getSystemService(NotificationManager::class.java) ?: return false
+        return manager.canUseFullScreenIntent()
+    }
+
+    private fun buildSessionLaunchPendingIntent(action: String, sessionId: String, requestCode: Int): PendingIntent {
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            this.action = action
+            putExtra(EXTRA_SESSION_ID, sessionId)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            this,
+            requestCode,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private fun forceOpenMainActivity(
+        action: String,
+        sessionId: String,
+        requestCode: Int,
+        source: String
+    ) {
+        val pendingIntent = buildSessionLaunchPendingIntent(action, sessionId, requestCode)
+        val launchedViaPendingIntent = runCatching {
+            pendingIntent.send()
+            true
+        }.getOrElse { error ->
+            Log.w("SXS/Main", "Falha ao abrir app por PendingIntent ($source)", error)
+            false
+        }
+        Log.i(
+            "SXS/Main",
+            "ForceOpen source=$source action=$action session=$sessionId foreground=$appInForeground pendingSent=$launchedViaPendingIntent"
+        )
+        if (launchedViaPendingIntent) return
+
         val launchIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_FEEDBACK
+            this.action = action
             putExtra(EXTRA_SESSION_ID, sessionId)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
         runCatching { startActivity(launchIntent) }
-            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir tela de avaliacao automaticamente", err) }
+            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir app via startActivity ($source)", err) }
+    }
+
+    private fun bringAppToForegroundForFeedback(sessionId: String) {
+        forceOpenMainActivity(
+            action = ACTION_OPEN_SESSION_FEEDBACK,
+            sessionId = sessionId,
+            requestCode = abs(sessionId.hashCode()) + 10_001,
+            source = "feedback"
+        )
     }
 
     private fun bringAppToForegroundForSession(sessionId: String) {
-        val launchIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_CHAT
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        runCatching { startActivity(launchIntent) }
-            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir sessao automaticamente", err) }
+        forceOpenMainActivity(
+            action = ACTION_OPEN_SESSION_CHAT,
+            sessionId = sessionId,
+            requestCode = abs(sessionId.hashCode()) + 8_001,
+            source = "session"
+        )
     }
 
     private fun notifySupportAcceptedByTech(sessionId: String, techName: String?) {
@@ -1187,28 +1233,27 @@ class MainActivity : ComponentActivity() {
             importance = NotificationManager.IMPORTANCE_HIGH
         )
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_CHAT
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            abs(sessionId.hashCode()) + 8_000,
-            openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val pendingIntent = buildSessionLaunchPendingIntent(
+            action = ACTION_OPEN_SESSION_CHAT,
+            sessionId = sessionId,
+            requestCode = abs(sessionId.hashCode()) + 8_000
         )
 
         val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
-        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+        val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
+        val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Atendimento iniciado")
             .setContentText("$techLabel iniciou seu atendimento. Abrindo o Suporte X...")
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setContentIntent(pendingIntent)
-            .build()
+        if (canUseFullscreen) {
+            notificationBuilder.setFullScreenIntent(pendingIntent, true)
+        }
+        val notification = notificationBuilder.build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
         manager.notify(3_500 + abs(sessionId.hashCode() % 900), notification)
