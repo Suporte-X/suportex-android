@@ -859,41 +859,6 @@ class MainActivity : ComponentActivity() {
 
         if (runtimePermissions.isNotEmpty()) {
             initialRuntimePermissionsLauncher.launch(runtimePermissions.toTypedArray())
-        } else {
-            maybePromptSpecialPermissionSetup()
-        }
-    }
-
-    private fun maybePromptSpecialPermissionSetup() {
-        val overlayMissing = !Settings.canDrawOverlays(this)
-        val accessibilityMissing = !isAccessibilityServiceEnabled()
-        if (!overlayMissing && !accessibilityMissing) return
-
-        val missingLabels = buildList {
-            if (overlayMissing) add("sobreposicao")
-            if (accessibilityMissing) add("acessibilidade")
-        }
-        val message = buildString {
-            append("Para melhorar sua experiencia no atendimento, recomendamos ativar: ")
-            append(missingLabels.joinToString(" e "))
-            append(". ")
-            append("Essas permissoes ajudam no retorno automatico para avaliacao e no acesso remoto assistido.")
-        }
-
-        runOnUiThread {
-            AlertDialog.Builder(this)
-                .setTitle("Permissoes recomendadas")
-                .setMessage(message)
-                .setCancelable(true)
-                .setNegativeButton("Agora nao", null)
-                .setPositiveButton("Configurar") { _, _ ->
-                    if (overlayMissing) {
-                        openOverlaySettings()
-                    } else if (accessibilityMissing) {
-                        openAccessibilitySettings()
-                    }
-                }
-                .show()
         }
     }
 
@@ -2123,16 +2088,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private val initialRuntimePermissionsLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            maybePromptSpecialPermissionSetup()
-        }
-
-    private val overlayPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (!isAccessibilityServiceEnabled()) {
-                openAccessibilitySettings()
-            }
-        }
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ -> }
 
     private val attachmentPickerLauncher =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -2148,16 +2104,6 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(intent)
-    }
-
-    private fun openOverlaySettings() {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            "package:$packageName".toUri()
-        ).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        overlayPermissionLauncher.launch(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
