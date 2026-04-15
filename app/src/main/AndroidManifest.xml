@@ -52,6 +52,7 @@
 
         <activity
             android:name="com.suportex.app.MainActivity"
+            android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

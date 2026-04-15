@@ -901,6 +901,11 @@ class MainActivity : ComponentActivity() {
             ACTION_OPEN_SESSION_CHAT -> pendingLaunchSessionFromNotification = sessionId
             ACTION_OPEN_SESSION_FEEDBACK -> pendingLaunchFeedbackSessionId = sessionId
         }
+        if (action == ACTION_OPEN_SESSION_CHAT || action == ACTION_OPEN_SESSION_FEEDBACK) {
+            // Evita reprocessar a mesma acao em recriacoes da Activity (ex.: rotacao de tela).
+            intent?.action = Intent.ACTION_MAIN
+            intent?.removeExtra(EXTRA_SESSION_ID)
+        }
     }
 
     private fun applyPendingLaunchIntentNavigation() {
