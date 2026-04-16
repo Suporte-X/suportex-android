@@ -1060,7 +1060,7 @@ class MainActivity : ComponentActivity() {
         val title = message.fromName?.takeIf { it.isNotBlank() } ?: "Suporte X"
         val body = buildChatNotificationBody(message)
         val notification = NotificationCompat.Builder(this, CHAT_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -1164,7 +1164,7 @@ class MainActivity : ComponentActivity() {
         )
 
         val notification = NotificationCompat.Builder(this, CALL_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("Chamada recebida")
             .setContentText("Suporte X está chamando você. Toque para abrir.")
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -1236,7 +1236,7 @@ class MainActivity : ComponentActivity() {
         val body = buildSessionEndedNotificationBody(reason)
         val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
         val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("Atendimento encerrado")
             .setContentText(body)
             .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
@@ -1339,7 +1339,7 @@ class MainActivity : ComponentActivity() {
         val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
         val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
         val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("Atendimento iniciado")
             .setContentText("$techLabel iniciou seu atendimento. Abrindo o Suporte X...")
             .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)

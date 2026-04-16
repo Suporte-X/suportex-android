@@ -157,7 +157,7 @@ class WaitingSupportMonitorService : Service() {
         }
 
         val notification = NotificationCompat.Builder(this, WAITING_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("Suporte X em espera ativa")
             .setContentText(contentText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
@@ -204,7 +204,7 @@ class WaitingSupportMonitorService : Service() {
         val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
         val body = "$techLabel iniciou seu atendimento. Toque para abrir o Suporte X."
         val notification = NotificationCompat.Builder(this, SESSION_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
             .setContentTitle("Atendimento iniciado")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
