@@ -139,6 +139,7 @@ private const val ACTION_WAITING_SUPPORT_ACCEPTED = "com.suportex.app.action.WAI
 private const val EXTRA_SESSION_ID = "extra_session_id"
 private const val EXTRA_TECH_NAME = "extra_tech_name"
 private const val EXTRA_LOCAL_SUPPORT_SESSION_ID = "extra_local_support_session_id"
+private const val EXTRA_WAITING_ANCHOR_ID = "extra_waiting_anchor_id"
 private const val PREFS_WAITING_SUPPORT = "waiting_support_runtime"
 private const val KEY_PENDING_SUPPORT_SESSION_ID = "pending_support_session_id"
 private const val WAITING_SESSION_RECOVERY_INTERVAL_MS = 4_000L
@@ -256,9 +257,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startWaitingSupportForegroundService(localSupportSessionId: String) {
+    private fun startWaitingSupportForegroundService(anchorId: String, localSupportSessionId: String?) {
+        val normalizedAnchorId = anchorId.trim()
+        if (normalizedAnchorId.isBlank()) return
         val intent = Intent(this, WaitingSupportMonitorService::class.java).apply {
             action = WaitingSupportMonitorService.ACTION_START_MONITOR
+            putExtra(EXTRA_WAITING_ANCHOR_ID, normalizedAnchorId)
             putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, localSupportSessionId)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -304,12 +308,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun syncWaitingSupportForegroundService() {
-        val localSupportSessionId = pendingSupportSessionId
-        if (localSupportSessionId.isNullOrBlank()) {
+        val anchorId = pendingSupportSessionId
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: activeSupportRequestId
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+        if (anchorId.isNullOrBlank()) {
             stopWaitingSupportForegroundService()
             return
         }
-        startWaitingSupportForegroundService(localSupportSessionId)
+        startWaitingSupportForegroundService(
+            anchorId = anchorId,
+            localSupportSessionId = pendingSupportSessionId
+        )
     }
 
     private fun setPendingSupportSession(localSupportSessionId: String?) {
@@ -1385,6 +1397,8 @@ class MainActivity : ComponentActivity() {
         if (currentSessionId == sid) {
             Conn.techName = resolvedTechName
             startSessionAnchorForegroundService(sid, resolvedTechName)
+            activeSupportRequestId = null
+            syncWaitingSupportForegroundService()
             runOnUiThread {
                 setTechNameFromSocket?.invoke(resolvedTechName)
                 setRequestIdFromSocket?.invoke(null)
@@ -1790,6 +1804,7 @@ class MainActivity : ComponentActivity() {
             val data = (any as? JSONObject) ?: return@on
             val reqId = data.optString("requestId", "").takeIf { it.isNotBlank() }
             activeSupportRequestId = reqId
+            syncWaitingSupportForegroundService()
             startWaitingSessionRecovery()
             runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
         }
