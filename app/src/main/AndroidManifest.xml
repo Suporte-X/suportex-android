@@ -45,6 +45,11 @@
             android:foregroundServiceType="dataSync" />
 
         <service
+            android:name="com.suportex.app.SessionAnchorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
             android:name="com.suportex.app.remote.RemoteControlService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="false">

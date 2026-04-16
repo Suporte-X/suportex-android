@@ -29,28 +29,37 @@ class WaitingSupportMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startWaitingForeground(localSupportSessionId = null)
+        startWaitingForeground(
+            localSupportSessionId = null,
+            startedAtMillis = System.currentTimeMillis()
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_MONITOR) {
-            writePendingSupportSessionToPrefs(null)
+            writeWaitingStateToPrefs(null, null)
             stopSelfSafe()
             return START_NOT_STICKY
         }
 
+        val prefState = readWaitingStateFromPrefs()
         val localSupportSessionId = intent?.getStringExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
             ?.trim()
             ?.takeIf { it.isNotBlank() }
-            ?: readPendingSupportSessionFromPrefs()
+            ?: prefState.localSupportSessionId
 
         if (localSupportSessionId.isNullOrBlank()) {
             stopSelfSafe()
             return START_NOT_STICKY
         }
 
-        writePendingSupportSessionToPrefs(localSupportSessionId)
-        startWaitingForeground(localSupportSessionId)
+        val waitingStartedAtMillis = when {
+            localSupportSessionId == prefState.localSupportSessionId && prefState.startedAtMillis > 0L ->
+                prefState.startedAtMillis
+            else -> System.currentTimeMillis()
+        }
+        writeWaitingStateToPrefs(localSupportSessionId, waitingStartedAtMillis)
+        startWaitingForeground(localSupportSessionId, waitingStartedAtMillis)
 
         if (monitorJob?.isActive == true && monitoredLocalSupportSessionId == localSupportSessionId) {
             return START_STICKY
@@ -80,7 +89,7 @@ class WaitingSupportMonitorService : Service() {
                         techName = recovered.techName,
                         localSupportSessionId = trackedSessionId
                     )
-                    writePendingSupportSessionToPrefs(null)
+                    writeWaitingStateToPrefs(null, null)
                     stopSelfSafe()
                     break
                 }
@@ -102,7 +111,7 @@ class WaitingSupportMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startWaitingForeground(localSupportSessionId: String?) {
+    private fun startWaitingForeground(localSupportSessionId: String?, startedAtMillis: Long) {
         ensureNotificationChannel(
             id = WAITING_CHANNEL_ID,
             name = "Fila de atendimento",
@@ -132,8 +141,11 @@ class WaitingSupportMonitorService : Service() {
             .setContentText(contentText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setWhen(startedAtMillis.coerceAtLeast(0L))
+            .setUsesChronometer(true)
             .setContentIntent(openPendingIntent)
             .build()
 
@@ -212,21 +224,35 @@ class WaitingSupportMonitorService : Service() {
         runCatching { stopSelf() }
     }
 
-    private fun readPendingSupportSessionFromPrefs(): String? {
-        return getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
-            .getString(KEY_PENDING_SUPPORT_SESSION_ID, null)
+    private fun readWaitingStateFromPrefs(): WaitingState {
+        val prefs = getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
+        val localSupportSessionId = prefs.getString(KEY_PENDING_SUPPORT_SESSION_ID, null)
             ?.trim()
             ?.takeIf { it.isNotBlank() }
+        val startedAtMillis = prefs.getLong(KEY_WAITING_STARTED_AT_MILLIS, 0L).coerceAtLeast(0L)
+        return WaitingState(
+            localSupportSessionId = localSupportSessionId,
+            startedAtMillis = startedAtMillis
+        )
     }
 
-    private fun writePendingSupportSessionToPrefs(localSupportSessionId: String?) {
+    private fun writeWaitingStateToPrefs(localSupportSessionId: String?, startedAtMillis: Long?) {
         val prefs = getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
+        val edit = prefs.edit()
         if (localSupportSessionId.isNullOrBlank()) {
-            prefs.edit().remove(KEY_PENDING_SUPPORT_SESSION_ID).apply()
+            edit.remove(KEY_PENDING_SUPPORT_SESSION_ID)
+            edit.remove(KEY_WAITING_STARTED_AT_MILLIS)
         } else {
-            prefs.edit().putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId).apply()
+            edit.putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId)
+            edit.putLong(KEY_WAITING_STARTED_AT_MILLIS, (startedAtMillis ?: 0L).coerceAtLeast(0L))
         }
+        edit.apply()
     }
+
+    private data class WaitingState(
+        val localSupportSessionId: String?,
+        val startedAtMillis: Long
+    )
 
     companion object {
         const val ACTION_START_MONITOR = "com.suportex.app.action.START_WAITING_SUPPORT_MONITOR"
@@ -238,6 +264,7 @@ class WaitingSupportMonitorService : Service() {
         private const val EXTRA_LOCAL_SUPPORT_SESSION_ID = "extra_local_support_session_id"
         private const val PREFS_WAITING_SUPPORT = "waiting_support_runtime"
         private const val KEY_PENDING_SUPPORT_SESSION_ID = "pending_support_session_id"
+        private const val KEY_WAITING_STARTED_AT_MILLIS = "waiting_started_at_millis"
 
         private const val WAITING_CHANNEL_ID = "suportex_waiting_queue"
         private const val SESSION_CHANNEL_ID = "suportex_session_events"

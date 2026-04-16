@@ -278,14 +278,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startSessionAnchorForegroundService(sessionId: String, techName: String?) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isBlank()) return
+        val intent = Intent(this, SessionAnchorService::class.java).apply {
+            action = SessionAnchorService.ACTION_START_SESSION_ANCHOR
+            putExtra(EXTRA_SESSION_ID, normalizedSessionId)
+            putExtra(EXTRA_TECH_NAME, techName)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching { startForegroundService(intent) }
+                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar ancora de sessao", err) }
+        } else {
+            runCatching { startService(intent) }
+                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar ancora de sessao", err) }
+        }
+    }
+
+    private fun stopSessionAnchorForegroundService() {
+        runCatching {
+            stopService(Intent(this, SessionAnchorService::class.java))
+        }.onFailure { err ->
+            Log.w("SXS/Main", "Falha ao parar ancora de sessao", err)
+        }
+    }
+
     private fun syncWaitingSupportForegroundService() {
         val localSupportSessionId = pendingSupportSessionId
         if (localSupportSessionId.isNullOrBlank()) {
-            stopWaitingSupportForegroundService()
-            return
-        }
-        if (appInForeground) {
-            // Com o app aberto, evitamos notificacao persistente da fila.
             stopWaitingSupportForegroundService()
             return
         }
@@ -1364,6 +1384,7 @@ class MainActivity : ComponentActivity() {
 
         if (currentSessionId == sid) {
             Conn.techName = resolvedTechName
+            startSessionAnchorForegroundService(sid, resolvedTechName)
             runOnUiThread {
                 setTechNameFromSocket?.invoke(resolvedTechName)
                 setRequestIdFromSocket?.invoke(null)
@@ -1388,6 +1409,7 @@ class MainActivity : ComponentActivity() {
         currentSessionId = sid
         remoteConsentAcceptedForCurrentSession = false
         resetSessionState()
+        startSessionAnchorForegroundService(sid, resolvedTechName)
         voiceCallManager.bindSession(sid)
         registerSessionStart(sid, resolvedTechName)
 
@@ -1716,6 +1738,7 @@ class MainActivity : ComponentActivity() {
         pendingSupportStartContext = null
         setPendingSupportSession(null)
         stopWaitingSessionRecovery()
+        stopSessionAnchorForegroundService()
         stopIncomingCallAlert()
         cancelIncomingCallNotification(sid)
         finalizeSession()
