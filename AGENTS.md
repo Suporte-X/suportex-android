@@ -1,4 +1,4 @@
-# SupportX - Protocolo de Memoria Codex
+# Suporte X - Protocolo de Memoria Codex
 
 Este repositorio usa memoria local para reduzir retrabalho entre chats.
 

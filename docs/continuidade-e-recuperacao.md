@@ -1,4 +1,4 @@
-# SuporteX - Continuidade e Recuperacao
+# Suporte X - Continuidade e Recuperacao
 
 Atualizado em: 2026-04-06
 

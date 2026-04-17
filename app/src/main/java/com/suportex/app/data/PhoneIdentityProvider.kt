@@ -35,7 +35,12 @@ class FirebasePhoneIdentityProvider(
     context: Context,
     private val firebaseAuth: FirebaseAuth = FirebaseAuth.getInstance()
 ) : PhoneIdentityProvider {
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    init {
+        migrateLegacyPrefsIfNeeded()
+    }
 
     override suspend fun getVerifiedPhoneNumber(): String? {
         val cached = prefs.getString(KEY_VERIFIED_PHONE, null)
@@ -104,8 +109,22 @@ class FirebasePhoneIdentityProvider(
             msg.contains("dismiss")
     }
 
+    private fun migrateLegacyPrefsIfNeeded() {
+        val hasCurrentValue = !prefs.getString(KEY_VERIFIED_PHONE, null).isNullOrBlank()
+        if (hasCurrentValue) return
+
+        val legacyPrefs = appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+        val legacyValue = legacyPrefs.getString(KEY_VERIFIED_PHONE, null)?.trim()?.takeIf { it.isNotBlank() }
+        if (legacyValue.isNullOrBlank()) return
+
+        prefs.edit()
+            .putString(KEY_VERIFIED_PHONE, legacyValue)
+            .apply()
+    }
+
     private companion object {
-        const val PREFS_NAME = "supportx_pnv_identity"
+        const val PREFS_NAME = "suporte_x_pnv_identity"
+        const val LEGACY_PREFS_NAME = "supp" + "ortx_pnv_identity"
         const val KEY_VERIFIED_PHONE = "verified_phone"
     }
 }

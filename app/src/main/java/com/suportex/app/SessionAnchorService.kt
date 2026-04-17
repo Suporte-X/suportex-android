@@ -79,7 +79,7 @@ class SessionAnchorService : Service() {
         val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
         val content = "Atendimento em andamento com $techLabel."
         val notification = NotificationCompat.Builder(this, SESSION_ANCHOR_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Sessao ativa")
             .setContentText(content)
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))

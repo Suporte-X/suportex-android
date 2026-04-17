@@ -747,7 +747,7 @@ class ScreenCaptureService : Service() {
         val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
             .setContentTitle("Suporte X")
             .setContentText("Capturando a tela…")
-            .setSmallIcon(android.R.drawable.presence_video_online)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .addAction(

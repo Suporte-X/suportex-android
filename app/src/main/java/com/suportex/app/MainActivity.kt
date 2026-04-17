@@ -627,7 +627,7 @@ class MainActivity : ComponentActivity() {
             ensureRemoteAccessConsent {
                 if (!isAccessibilityServiceEnabled()) {
                     openAccessibilitySettings()
-                    setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > SuporteX > Ativar para permitir o controle remoto.")
+                    setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > Suporte X > Ativar para permitir o controle remoto.")
                 }
                 updateRemoteState(enabled = true, origin = "client")
                 sendCommand("remote_enable")
@@ -1060,7 +1060,7 @@ class MainActivity : ComponentActivity() {
         val title = message.fromName?.takeIf { it.isNotBlank() } ?: "Suporte X"
         val body = buildChatNotificationBody(message)
         val notification = NotificationCompat.Builder(this, CHAT_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -1164,7 +1164,7 @@ class MainActivity : ComponentActivity() {
         )
 
         val notification = NotificationCompat.Builder(this, CALL_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Chamada recebida")
             .setContentText("Suporte X está chamando você. Toque para abrir.")
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -1236,7 +1236,7 @@ class MainActivity : ComponentActivity() {
         val body = buildSessionEndedNotificationBody(reason)
         val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
         val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Atendimento encerrado")
             .setContentText(body)
             .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
@@ -1339,7 +1339,7 @@ class MainActivity : ComponentActivity() {
         val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
         val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
         val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Atendimento iniciado")
             .setContentText("$techLabel iniciou seu atendimento. Abrindo o Suporte X...")
             .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)

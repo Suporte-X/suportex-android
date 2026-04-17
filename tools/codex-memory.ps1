@@ -53,7 +53,7 @@ function Ensure-MemoryStructure {
     if (-not (Test-Path $sessionsDir)) { New-Item -ItemType Directory -Path $sessionsDir | Out-Null }
     if (-not (Test-Path $stateFile)) {
         @"
-# Estado Consolidado - SupportX
+# Estado Consolidado - Suporte X
 
 Atualizado em: $(Get-Date -Format "yyyy-MM-dd")
 "@ | Set-Content -Path $stateFile -Encoding UTF8
