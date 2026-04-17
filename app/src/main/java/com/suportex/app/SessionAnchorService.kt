@@ -61,7 +61,7 @@ class SessionAnchorService : Service() {
             id = SESSION_ANCHOR_CHANNEL_ID,
             name = "Sessao ativa",
             description = "Indicador continuo de sessao ativa durante o atendimento.",
-            importance = NotificationManager.IMPORTANCE_LOW
+            importance = NotificationManager.IMPORTANCE_DEFAULT
         )
 
         val openIntent = Intent(this, MainActivity::class.java).apply {
@@ -85,9 +85,11 @@ class SessionAnchorService : Service() {
             .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setSilent(true)
             .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setWhen(startedAtMillis)
             .setUsesChronometer(true)
             .build()
@@ -108,6 +110,7 @@ class SessionAnchorService : Service() {
             this.description = description
             enableVibration(false)
             setSound(null, null)
+            setShowBadge(false)
         }
         manager.createNotificationChannel(channel)
     }
@@ -167,7 +170,7 @@ class SessionAnchorService : Service() {
         private const val KEY_TECH_NAME = "tech_name"
         private const val KEY_STARTED_AT_MILLIS = "started_at_millis"
 
-        private const val SESSION_ANCHOR_CHANNEL_ID = "suportex_session_anchor"
+        private const val SESSION_ANCHOR_CHANNEL_ID = "suportex_session_anchor_v2"
         private const val SESSION_ANCHOR_NOTIFICATION_ID = 6_200
     }
 }

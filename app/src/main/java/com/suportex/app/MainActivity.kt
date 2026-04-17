@@ -292,7 +292,13 @@ class MainActivity : ComponentActivity() {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching { startForegroundService(intent) }
-                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar ancora de sessao", err) }
+                .onFailure { err ->
+                    Log.w("SXS/Main", "Falha ao iniciar ancora de sessao via foreground", err)
+                    runCatching { startService(intent) }
+                        .onFailure { fallbackErr ->
+                            Log.w("SXS/Main", "Falha ao iniciar ancora de sessao via fallback", fallbackErr)
+                        }
+                }
         } else {
             runCatching { startService(intent) }
                 .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar ancora de sessao", err) }
@@ -301,10 +307,31 @@ class MainActivity : ComponentActivity() {
 
     private fun stopSessionAnchorForegroundService() {
         runCatching {
-            stopService(Intent(this, SessionAnchorService::class.java))
+            val intent = Intent(this, SessionAnchorService::class.java).apply {
+                action = SessionAnchorService.ACTION_STOP_SESSION_ANCHOR
+            }
+            startService(intent)
         }.onFailure { err ->
-            Log.w("SXS/Main", "Falha ao parar ancora de sessao", err)
+            Log.w("SXS/Main", "Falha ao solicitar parada da ancora de sessao", err)
+            runCatching { stopService(Intent(this, SessionAnchorService::class.java)) }
+                .onFailure { stopErr ->
+                    Log.w("SXS/Main", "Falha ao parar ancora de sessao via stopService", stopErr)
+                }
         }
+    }
+
+    private fun syncSessionAnchorForegroundService() {
+        val sessionId = currentSessionId
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        if (sessionId.isNullOrBlank()) {
+            stopSessionAnchorForegroundService()
+            return
+        }
+        startSessionAnchorForegroundService(
+            sessionId = sessionId,
+            techName = Conn.techName
+        )
     }
 
     private fun syncWaitingSupportForegroundService() {
@@ -1020,8 +1047,43 @@ class MainActivity : ComponentActivity() {
         val chatSessionId = pendingLaunchSessionFromNotification
         if (!chatSessionId.isNullOrBlank()) {
             pendingLaunchSessionFromNotification = null
-            setSessionIdFromSocket?.invoke(chatSessionId)
+            openSessionFromChatNotification(chatSessionId)
+        }
+    }
+
+    private fun openSessionFromChatNotification(sessionId: String) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isBlank()) return
+
+        if (currentSessionId == normalizedSessionId) {
+            clearTransientSupportNotifications(normalizedSessionId)
+            setSessionIdFromSocket?.invoke(normalizedSessionId)
             setScreenFromSocket?.invoke(Screen.SESSION)
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val activeRealtimeSession = runCatching {
+                clientSupportRepository.findActiveRealtimeSession(pendingSupportSessionId)
+            }.getOrNull()
+            val canOpenSession = activeRealtimeSession?.sessionId
+                ?.trim()
+                ?.equals(normalizedSessionId, ignoreCase = false) == true
+            runOnUiThread {
+                clearTransientSupportNotifications(normalizedSessionId)
+                if (!canOpenSession) {
+                    if (currentSessionId.isNullOrBlank()) {
+                        setScreenFromSocket?.invoke(Screen.HOME)
+                    }
+                    setSystemMessageFromLauncher?.invoke("Essa sessao ja foi encerrada.")
+                    return@runOnUiThread
+                }
+                handleSupportAccepted(
+                    sessionId = normalizedSessionId,
+                    techName = activeRealtimeSession?.techName,
+                    source = "chat_notification_validation"
+                )
+            }
         }
     }
 
@@ -1070,11 +1132,89 @@ class MainActivity : ComponentActivity() {
             .build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        manager.notify(2_000 + abs(sessionId.hashCode() % 900), notification)
+        manager.notify(chatNotificationId(sessionId), notification)
+    }
+
+    private fun chatNotificationId(sessionId: String): Int {
+        return 2_000 + abs(sessionId.hashCode() % 900)
+    }
+
+    private fun sessionEndedNotificationId(sessionId: String): Int {
+        return 3_000 + abs(sessionId.hashCode() % 900)
+    }
+
+    private fun supportAcceptedNotificationId(sessionId: String): Int {
+        return 3_500 + abs(sessionId.hashCode() % 900)
+    }
+
+    private fun waitingAcceptedNotificationId(sessionId: String): Int {
+        return 3_600 + abs(sessionId.hashCode() % 900)
     }
 
     private fun callNotificationId(sessionId: String): Int {
         return 4_000 + abs(sessionId.hashCode() % 900)
+    }
+
+    private fun clearTransientSupportNotifications(sessionId: String? = null) {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+
+        if (!sessionId.isNullOrBlank()) {
+            val normalized = sessionId.trim()
+            manager.cancel(chatNotificationId(normalized))
+            manager.cancel(callNotificationId(normalized))
+            manager.cancel(sessionEndedNotificationId(normalized))
+            manager.cancel(supportAcceptedNotificationId(normalized))
+            manager.cancel(waitingAcceptedNotificationId(normalized))
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            manager.activeNotifications.forEach { active ->
+                val notificationId = active.id
+                val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    active.notification.channelId
+                } else {
+                    null
+                }
+                val isPersistentForeground = notificationId == 1 ||
+                    notificationId == 6_100 ||
+                    notificationId == 6_200 ||
+                    channelId == "screen_capture" ||
+                    channelId == "suportex_waiting_queue" ||
+                    channelId == "suportex_session_anchor" ||
+                    channelId == "suportex_session_anchor_v2"
+                if (!isPersistentForeground) {
+                    manager.cancel(notificationId)
+                }
+            }
+            return
+        }
+
+        for (offset in 0 until 900) {
+            manager.cancel(2_000 + offset)
+            manager.cancel(3_000 + offset)
+            manager.cancel(3_500 + offset)
+            manager.cancel(3_600 + offset)
+            manager.cancel(4_000 + offset)
+        }
+    }
+
+    private fun clearAllSupportNotificationsAfterFeedback() {
+        stopIncomingCallAlert()
+        stopWaitingSupportForegroundService()
+        stopSessionAnchorForegroundService()
+        val stopCaptureIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP
+        }
+        runCatching { ContextCompat.startForegroundService(this, stopCaptureIntent) }
+            .onFailure { err ->
+                Log.w("SXS/Main", "Falha ao parar captura durante limpeza final", err)
+            }
+        runCatching {
+            getSystemService(NotificationManager::class.java)?.cancelAll()
+        }.onFailure { err ->
+            Log.w("SXS/Main", "Falha ao limpar notificacoes apos feedback", err)
+        }
     }
 
     private fun ensureCallNotificationChannel() {
@@ -1250,7 +1390,7 @@ class MainActivity : ComponentActivity() {
         val notification = notificationBuilder.build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        manager.notify(3_000 + abs(sessionId.hashCode() % 900), notification)
+        manager.notify(sessionEndedNotificationId(sessionId), notification)
     }
 
     private fun canUseFullScreenIntent(): Boolean {
@@ -1353,7 +1493,7 @@ class MainActivity : ComponentActivity() {
         val notification = notificationBuilder.build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        manager.notify(3_500 + abs(sessionId.hashCode() % 900), notification)
+        manager.notify(supportAcceptedNotificationId(sessionId), notification)
     }
 
     private fun stopWaitingSessionRecovery() {
@@ -1740,6 +1880,9 @@ class MainActivity : ComponentActivity() {
             updateRemoteState(enabled = false, origin = origin)
         }
         if (shareWasActive) {
+            stopScreenShare(fromCommand = true, originOverride = origin)
+        }
+        if (!shareWasActive && isScreenCaptureServiceRunning()) {
             stopScreenShare(fromCommand = true, originOverride = origin)
         }
 
@@ -2747,6 +2890,7 @@ class MainActivity : ComponentActivity() {
                                 if (!targetSessionId.isNullOrBlank()) {
                                     submitCustomerSatisfaction(targetSessionId, score)
                                 }
+                                clearAllSupportNotificationsAfterFeedback()
                                 Toast.makeText(
                                     this@MainActivity,
                                     "Obrigado pelo seu feedback.",
@@ -2780,6 +2924,10 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         appInForeground = true
         syncWaitingSupportForegroundService()
+        syncSessionAnchorForegroundService()
+        if (!currentSessionId.isNullOrBlank()) {
+            clearTransientSupportNotifications(currentSessionId)
+        }
         maybePromptInitialCriticalPermissions()
         val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
             currentCallDirection == CallDirection.TECH_TO_CLIENT
@@ -2799,6 +2947,7 @@ class MainActivity : ComponentActivity() {
         }
         appInForeground = false
         syncWaitingSupportForegroundService()
+        syncSessionAnchorForegroundService()
         super.onStop()
     }
 
