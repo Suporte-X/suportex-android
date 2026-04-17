@@ -17,6 +17,14 @@ Garantir que o projeto possa ser retomado em outra maquina sem copia manual de H
 - `%USERPROFILE%\Workspaces\SuporteX\web-servidor` (repo Web/Servidor)
 - `%USERPROFILE%\Workspaces\SuporteX\android-app` (junction para o repo Android)
 
+## Mapa operacional rapido (anti-confusao)
+
+- Caminho oficial Android: `C:\Users\X-Not\AndroidStudioProjects\SuporteX`
+- Caminho oficial Web/Servidor: `C:\Users\X-Not\Workspaces\SuporteX\web-servidor`
+- `C:\Users\X-Not\Workspaces\SuporteX\android-app` nao e clone separado: e uma **junction** para o repo Android oficial.
+- Deploy automatico do Render acompanha `origin/main` do repo `suporte-x-servidor`.
+- Se um commit ficar em branch `codex/*` sem merge para `main`, o Render nao publica a mudanca.
+
 ## Fronteira de codigo (padrao obrigatorio)
 
 - No repo Android: somente codigo/app Android e scripts de continuidade local.
@@ -80,7 +88,7 @@ No repo Android:
 Interpretacao:
 
 - `OK` em tudo: retomada pronta.
-- `WARN`: existe divergencia local, arquivos sem commit, ou segredo local ausente.
+- `WARN`: existe divergencia local, arquivos sem commit, segredo local ausente, remoto incorreto, fronteira Android/Web quebrada, ou junction `android-app` apontando para caminho errado.
 
 ## Regra de ouro de continuidade
 

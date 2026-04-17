@@ -101,6 +101,127 @@ function Get-FileCheck([string]$label, [string]$filePath) {
     }
 }
 
+function Get-RepoRemoteCheck([string]$label, [string]$repoPath, [string]$expectedHint) {
+    if (-not (Test-Path (Join-Path $repoPath ".git"))) {
+        return [pscustomobject]@{
+            label = $label
+            path = $repoPath
+            ok = $false
+            notes = @("repo git ausente para validar remoto")
+        }
+    }
+
+    $remoteUrl = git -C $repoPath remote get-url origin 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($remoteUrl)) {
+        return [pscustomobject]@{
+            label = $label
+            path = $repoPath
+            ok = $false
+            notes = @("nao foi possivel ler remote.origin.url")
+        }
+    }
+
+    $ok = $remoteUrl -like "*$expectedHint*"
+    $notes = @("origin: $remoteUrl", "esperado conter: $expectedHint")
+    if (-not $ok) {
+        $notes += "remoto inesperado para este repositorio"
+    }
+
+    return [pscustomobject]@{
+        label = $label
+        path = $repoPath
+        ok = $ok
+        notes = $notes
+    }
+}
+
+function Get-RepoBoundaryCheck([string]$label, [string]$repoPath, [string[]]$forbiddenPatterns) {
+    if (-not (Test-Path (Join-Path $repoPath ".git"))) {
+        return [pscustomobject]@{
+            label = $label
+            path = $repoPath
+            ok = $false
+            notes = @("repo git ausente para validar fronteira")
+        }
+    }
+
+    $files = @(git -C $repoPath ls-files 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        return [pscustomobject]@{
+            label = $label
+            path = $repoPath
+            ok = $false
+            notes = @("falha ao listar arquivos versionados")
+        }
+    }
+
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($file in $files) {
+        foreach ($pattern in $forbiddenPatterns) {
+            if ($file -match $pattern) {
+                $hits.Add($file)
+                break
+            }
+        }
+    }
+
+    $ok = ($hits.Count -eq 0)
+    $notes = @()
+    if ($ok) {
+        $notes += "nenhum arquivo versionado fora da fronteira detectado"
+    } else {
+        $notes += "arquivos fora da fronteira detectados: $($hits.Count)"
+        $notes += "exemplos: $((@($hits) | Select-Object -First 5) -join ', ')"
+    }
+
+    return [pscustomobject]@{
+        label = $label
+        path = $repoPath
+        ok = $ok
+        notes = $notes
+    }
+}
+
+function Get-AndroidJunctionCheck([string]$androidRepoPath) {
+    $junctionPath = Join-Path $env:USERPROFILE "Workspaces\SuporteX\android-app"
+    if (-not (Test-Path $junctionPath)) {
+        return [pscustomobject]@{
+            label = "Junction Android workspace"
+            path = $junctionPath
+            ok = $true
+            notes = @("junction nao encontrada (opcional)")
+        }
+    }
+
+    $item = Get-Item -LiteralPath $junctionPath -Force
+    $isReparsePoint = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    if (-not $isReparsePoint -or [string]::IsNullOrWhiteSpace($item.Target)) {
+        return [pscustomobject]@{
+            label = "Junction Android workspace"
+            path = $junctionPath
+            ok = $false
+            notes = @("android-app existe, mas nao e junction para o repo oficial")
+        }
+    }
+
+    $targetPath = [string]$item.Target
+    $resolvedTarget = (Resolve-Path -LiteralPath $targetPath).Path
+    $resolvedAndroid = (Resolve-Path -LiteralPath $androidRepoPath).Path
+    $ok = $resolvedTarget -eq $resolvedAndroid
+
+    $notes = @("target: $resolvedTarget", "repo android oficial: $resolvedAndroid")
+    if (-not $ok) {
+        $notes += "junction aponta para caminho diferente do repo oficial"
+    }
+
+    return [pscustomobject]@{
+        label = "Junction Android workspace"
+        path = $junctionPath
+        ok = $ok
+        notes = $notes
+    }
+}
+
 $cfg = Get-ConfiguredPaths
 $androidPath = if ([string]::IsNullOrWhiteSpace($AndroidRepo)) { $cfg.androidRepo } else { Resolve-PathValue $AndroidRepo }
 $webPath = if ([string]::IsNullOrWhiteSpace($WebRepo)) { $cfg.webRepo } else { Resolve-PathValue $WebRepo }
@@ -108,6 +229,15 @@ $webPath = if ([string]::IsNullOrWhiteSpace($WebRepo)) { $cfg.webRepo } else { R
 $checks = @()
 $checks += Get-RepoStatus -label "Android repo" -repoPath $androidPath
 $checks += Get-RepoStatus -label "Web repo" -repoPath $webPath
+$checks += Get-RepoRemoteCheck -label "Android remote esperado" -repoPath $androidPath -expectedHint "suportex-android"
+$checks += Get-RepoRemoteCheck -label "Web remote esperado" -repoPath $webPath -expectedHint "suporte-x-servidor"
+$checks += Get-RepoBoundaryCheck -label "Fronteira Android (sem arquivos Web/Servidor)" -repoPath $androidPath -forbiddenPatterns @(
+    '^(web/|server/|server\.js$|firebase\.json$|\.firebaserc$|firestore\.rules$|storage\.rules$|package\.json$|package-lock\.json$)'
+)
+$checks += Get-RepoBoundaryCheck -label "Fronteira Web (sem arquivos Android)" -repoPath $webPath -forbiddenPatterns @(
+    '^(app/src/main/|gradle/|gradlew$|gradlew\.bat$|settings\.gradle\.kts$|build\.gradle\.kts$|app/build\.gradle\.kts$|.*\.kt$|.*AndroidManifest\.xml$)'
+)
+$checks += Get-AndroidJunctionCheck -androidRepoPath $androidPath
 $checks += Get-FileCheck -label "Android google-services.json" -filePath (Join-Path $androidPath "app\google-services.json")
 $checks += Get-FileCheck -label "Web firebase-admin.json" -filePath (Join-Path $webPath ".secrets\firebase-admin.json")
 
