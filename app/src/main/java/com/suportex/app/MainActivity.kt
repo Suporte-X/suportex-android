@@ -655,6 +655,9 @@ class MainActivity : ComponentActivity() {
                 if (!isAccessibilityServiceEnabled()) {
                     openAccessibilitySettings()
                     setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > Suporte X > Ativar para permitir o controle remoto.")
+                    updateRemoteState(enabled = false, origin = "client")
+                    sendCommand("remote_revoke")
+                    return@ensureRemoteAccessConsent
                 }
                 updateRemoteState(enabled = true, origin = "client")
                 sendCommand("remote_enable")
@@ -1729,27 +1732,41 @@ class MainActivity : ComponentActivity() {
             setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
             return
         }
-        runCatching {
-            val outFile = File.createTempFile("sx_audio_", ".m4a", cacheDir)
-            audioTempFile = outFile
-            val recorder = createMediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioSamplingRate(44100)
-                setAudioEncodingBitRate(96000)
-                setOutputFile(outFile.absolutePath)
-                prepare()
-                start()
+        lifecycleScope.launch(Dispatchers.IO) {
+            var recorder: MediaRecorder? = null
+            val result = runCatching {
+                val outFile = File.createTempFile("sx_audio_", ".m4a", cacheDir)
+                recorder = createMediaRecorder().apply {
+                    setAudioSource(MediaRecorder.AudioSource.MIC)
+                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setAudioSamplingRate(44100)
+                    setAudioEncodingBitRate(96000)
+                    setOutputFile(outFile.absolutePath)
+                    prepare()
+                    start()
+                }
+                recorder!! to outFile
             }
-            mediaRecorder = recorder
-            setRecordingAudioFromActivity?.invoke(true)
-            setSystemMessageFromLauncher?.invoke("Gravando audio... Toque novamente para enviar.")
-        }.onFailure {
-            mediaRecorder = null
-            audioTempFile = null
-            setRecordingAudioFromActivity?.invoke(false)
-            setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
+            if (result.isFailure) {
+                runCatching {
+                    recorder?.reset()
+                    recorder?.release()
+                }
+            }
+            runOnUiThread {
+                result.onSuccess { (preparedRecorder, outFile) ->
+                    mediaRecorder = preparedRecorder
+                    audioTempFile = outFile
+                    setRecordingAudioFromActivity?.invoke(true)
+                    setSystemMessageFromLauncher?.invoke("Gravando audio... Toque novamente para enviar.")
+                }.onFailure {
+                    mediaRecorder = null
+                    audioTempFile = null
+                    setRecordingAudioFromActivity?.invoke(false)
+                    setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
+                }
+            }
         }
     }
 
@@ -1770,21 +1787,37 @@ class MainActivity : ComponentActivity() {
         }
         val recorder = mediaRecorder ?: return
         val outFile = audioTempFile
-        runCatching {
-            recorder.stop()
-            recorder.reset()
-            recorder.release()
-        }
         mediaRecorder = null
         setRecordingAudioFromActivity?.invoke(false)
 
-        val file = outFile
-        if (file == null || !file.exists()) {
-            setSystemMessageFromLauncher?.invoke("Arquivo de audio nao encontrado.")
-            return
-        }
-
         lifecycleScope.launch(Dispatchers.IO) {
+            val stopResult = runCatching {
+                recorder.stop()
+                recorder.reset()
+                recorder.release()
+            }
+            if (stopResult.isFailure) {
+                runCatching {
+                    recorder.reset()
+                    recorder.release()
+                }
+                runOnUiThread {
+                    setSystemMessageFromLauncher?.invoke("Falha ao finalizar gravacao de audio.")
+                }
+                runCatching { outFile?.delete() }
+                audioTempFile = null
+                return@launch
+            }
+
+            val file = outFile
+            if (file == null || !file.exists()) {
+                runOnUiThread {
+                    setSystemMessageFromLauncher?.invoke("Arquivo de audio nao encontrado.")
+                }
+                audioTempFile = null
+                return@launch
+            }
+
             val result = runCatching {
                 Conn.chatRepository?.sendAudio(sid, from = "client", localUri = Uri.fromFile(file))
             }

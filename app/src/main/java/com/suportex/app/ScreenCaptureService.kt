@@ -138,7 +138,7 @@ class ScreenCaptureService : Service() {
                         videoSource!!.capturerObserver
                     )
                     val (captureWidth, captureHeight) = resolveCaptureSize()
-                    capturer!!.startCapture(captureWidth, captureHeight, 30)
+                    capturer!!.startCapture(captureWidth, captureHeight, 24)
                     RemoteExecutor.setCaptureFrameSize(captureWidth, captureHeight)
 
                     val iceServers = listOf(
@@ -194,8 +194,8 @@ class ScreenCaptureService : Service() {
                     videoSender = peerConnection!!.addTrack(videoTrack!!, listOf("screen"))
 
                     preferH264Codec()
-                    applyEncoderQuality(scaleDownBy = 1.0, maxFps = 30)
-                    applySenderParams(maxKbps = 2500, minKbps = 600, maxFps = 30, scaleDown = null)
+                    applyEncoderQuality(scaleDownBy = 1.33, maxFps = 24)
+                    applySenderParams(maxKbps = 1600, minKbps = 500, maxFps = 24, scaleDown = 1.33)
                     startDebugStatsLoop()
 
                     registerControlChannel(
@@ -795,6 +795,12 @@ class ScreenCaptureService : Service() {
         RemoteExecutor.clearCaptureFrameSize()
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         stopSelf()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        sendStatus("stopped", "task_removed")
+        stopSelfSafe()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {

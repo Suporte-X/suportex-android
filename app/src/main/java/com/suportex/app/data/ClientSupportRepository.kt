@@ -1,10 +1,12 @@
 package com.suportex.app.data
 
+import android.util.Log
 import com.google.android.gms.tasks.Task
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.suportex.app.Conn
@@ -53,6 +55,10 @@ class ClientSupportRepository(
     private val creditPackages = db.collection("credit_packages")
     private val creditOrders = db.collection("credit_orders")
     private val httpClient = OkHttpClient()
+    private val enableDeviceAnchorLinkLookup = false
+    @Volatile private var deviceAnchorLookupBlocked = false
+    @Volatile private var verificationPhoneLookupBlocked = true // Regras do cliente bloqueiam list/query por telefone.
+    @Volatile private var supportSessionRealtimeLookupBlocked = false
 
     suspend fun seedDefaultPackagesIfNeeded() {
         authRepository.ensureAnonAuth()
@@ -234,7 +240,6 @@ class ClientSupportRepository(
             "clientPhone" to startContext.phone,
             "clientName" to clientName,
             "clientUid" to clientUid,
-            "deviceAnchor" to deviceAnchor,
             "techId" to null,
             "techName" to null,
             "startedAt" to now,
@@ -1011,14 +1016,6 @@ class ClientSupportRepository(
     ): EnsureClientResult {
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
         if (sanitizedUid == null) {
-            val clientByVerificationPhone = resolveClientByVerificationPhone(normalizedPhone)
-            if (clientByVerificationPhone != null) {
-                return ensureClientRecord(
-                    clientId = clientByVerificationPhone.id,
-                    normalizedPhone = normalizedPhone,
-                    displayName = displayName
-                )
-            }
             val clientByDeviceAnchor = resolveLinkedClientByDeviceAnchor(deviceAnchor)
             if (clientByDeviceAnchor != null) {
                 return ensureClientRecord(
@@ -1041,12 +1038,10 @@ class ClientSupportRepository(
                 ?.takeIf { it.isNotBlank() }
         }.getOrNull()
         val deviceLinkedClientId = resolveLinkedClientByDeviceAnchor(deviceAnchor)?.id
-        val verificationLinkedClientId = resolveClientByVerificationPhone(normalizedPhone)?.id
 
         val candidateIds = listOfNotNull(
             linkedClientId,
             deviceLinkedClientId,
-            verificationLinkedClientId,
             clientDocIdFromUid(sanitizedUid),
             clientDocIdFromPhone(normalizedPhone)
         ).distinct()
@@ -1204,18 +1199,6 @@ class ClientSupportRepository(
         }
 
         if (normalizedPhone != null) {
-            val byVerificationPhone = resolveClientByVerificationPhone(normalizedPhone)
-            if (byVerificationPhone != null) {
-                if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
-                    upsertClientAppLink(
-                        clientUid = sanitizedUid,
-                        clientId = byVerificationPhone.id,
-                        phone = normalizedPhone,
-                        deviceAnchor = deviceAnchor
-                    )
-                }
-                return ResolvedClientResult(client = byVerificationPhone)
-            }
             val byPhone = clients.document(clientDocIdFromPhone(normalizedPhone)).get().await().toClientRecord()
             if (byPhone != null) {
                 if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
@@ -1227,6 +1210,18 @@ class ClientSupportRepository(
                     )
                 }
                 return ResolvedClientResult(client = byPhone)
+            }
+            val byVerificationPhone = resolveClientByVerificationPhone(normalizedPhone)
+            if (byVerificationPhone != null) {
+                if (sanitizedUid != null || !deviceAnchor.isNullOrBlank()) {
+                    upsertClientAppLink(
+                        clientUid = sanitizedUid,
+                        clientId = byVerificationPhone.id,
+                        phone = normalizedPhone,
+                        deviceAnchor = deviceAnchor
+                    )
+                }
+                return ResolvedClientResult(client = byVerificationPhone)
             }
         }
 
@@ -1241,25 +1236,52 @@ class ClientSupportRepository(
     }
 
     private suspend fun resolveLinkedClientByDeviceAnchor(deviceAnchor: String?): ClientRecord? {
+        if (!enableDeviceAnchorLinkLookup) return null
         val normalizedAnchor = deviceAnchor?.trim()?.takeIf { it.isNotBlank() } ?: return null
-        val linkSnapshot = runCatching {
+        val linkSnapshot = runLookupOrNull(
+            isBlocked = { deviceAnchorLookupBlocked },
+            onPermissionDenied = {
+                deviceAnchorLookupBlocked = true
+                Log.w("SXS/ClientRepo", "Lookup bloqueado por permissoes: client_app_links.deviceAnchor")
+            }
+        ) {
             clientAppLinks.document(linkDocIdFromDeviceAnchor(normalizedAnchor)).get().await()
-        }.getOrNull() ?: return null
+        } ?: return null
         val clientId = linkSnapshot.getString("clientId")?.takeIf { it.isNotBlank() } ?: return null
         return runCatching { clients.document(clientId).get().await().toClientRecord() }.getOrNull()
     }
 
     private suspend fun resolveClientByVerificationPhone(normalizedPhone: String): ClientRecord? {
         val candidateIds = mutableListOf<String>()
-        val verifiedMatches = runCatching {
-            clientVerifications.whereEqualTo("verifiedPhone", normalizedPhone).get().await()
-        }.getOrNull()
+        val verifiedMatches = runLookupOrNull(
+            isBlocked = { verificationPhoneLookupBlocked },
+            onPermissionDenied = {
+                verificationPhoneLookupBlocked = true
+                Log.w("SXS/ClientRepo", "Lookup bloqueado por permissoes: client_verifications.verifiedPhone")
+            }
+        ) {
+            clientVerifications
+                .whereEqualTo("verifiedPhone", normalizedPhone)
+                .limit(3)
+                .get()
+                .await()
+        }
         if (verifiedMatches != null) {
             candidateIds += verifiedMatches.documents.mapNotNull { it.getString("clientId") }
         }
-        val primaryMatches = runCatching {
-            clientVerifications.whereEqualTo("primaryPhone", normalizedPhone).get().await()
-        }.getOrNull()
+        val primaryMatches = runLookupOrNull(
+            isBlocked = { verificationPhoneLookupBlocked },
+            onPermissionDenied = {
+                verificationPhoneLookupBlocked = true
+                Log.w("SXS/ClientRepo", "Lookup bloqueado por permissoes: client_verifications.primaryPhone")
+            }
+        ) {
+            clientVerifications
+                .whereEqualTo("primaryPhone", normalizedPhone)
+                .limit(3)
+                .get()
+                .await()
+        }
         if (primaryMatches != null) {
             candidateIds += primaryMatches.documents.mapNotNull { it.getString("clientId") }
         }
@@ -1316,6 +1338,7 @@ class ClientSupportRepository(
                 ).await()
             }
         }
+        if (!enableDeviceAnchorLinkLookup) return
         deviceAnchor?.takeIf { it.isNotBlank() }?.let { anchor ->
             runCatching {
                 clientAppLinks.document(linkDocIdFromDeviceAnchor(anchor)).set(
@@ -1447,19 +1470,50 @@ class ClientSupportRepository(
         realtimeSessionId: String?
     ): DocumentReference? {
         localSupportSessionId?.takeIf { it.isNotBlank() }?.let { localId ->
-            val doc = supportSessions.document(localId).get().await()
-            if (doc.exists()) return supportSessions.document(localId)
+            val doc = runCatching { supportSessions.document(localId).get().await() }.getOrNull()
+            if (doc?.exists() == true) return supportSessions.document(localId)
         }
         realtimeSessionId?.takeIf { it.isNotBlank() }?.let { sessionId ->
-            val snapshot = supportSessions
-                .whereEqualTo("sessionId", sessionId)
-                .get()
-                .await()
-            if (!snapshot.isEmpty) {
+            val currentUid = runCatching { authRepository.ensureAnonAuth().trim() }.getOrNull().orEmpty()
+            val snapshot = runLookupOrNull(
+                isBlocked = { supportSessionRealtimeLookupBlocked },
+                onPermissionDenied = {
+                    supportSessionRealtimeLookupBlocked = true
+                    Log.w("SXS/ClientRepo", "Lookup bloqueado por permissoes: support_sessions.sessionId")
+                }
+            ) {
+                var query: Query = supportSessions.whereEqualTo("sessionId", sessionId)
+                if (currentUid.isNotBlank()) {
+                    query = query.whereEqualTo("clientUid", currentUid)
+                }
+                query.limit(1).get().await()
+            }
+            if (snapshot != null && !snapshot.isEmpty) {
                 return snapshot.documents.first().reference
             }
         }
         return null
+    }
+
+    private suspend inline fun <T> runLookupOrNull(
+        isBlocked: () -> Boolean,
+        crossinline onPermissionDenied: () -> Unit,
+        crossinline block: suspend () -> T
+    ): T? {
+        if (isBlocked()) return null
+        return try {
+            block()
+        } catch (t: Throwable) {
+            if (t.isPermissionDenied()) {
+                onPermissionDenied()
+            }
+            null
+        }
+    }
+
+    private fun Throwable.isPermissionDenied(): Boolean {
+        return this is FirebaseFirestoreException &&
+            this.code == FirebaseFirestoreException.Code.PERMISSION_DENIED
     }
 
     private fun clientDocIdFromPhone(phone: String): String =
