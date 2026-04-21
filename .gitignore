@@ -26,3 +26,8 @@ Thumbs.db
 
 # Local helper scripts (do not commit)
 tools/start_dual_monitor.ps1
+
+# Local signing/distribution artifacts (do not commit)
+Chaves/
+app/release/
+app/src/main/assets/adi-registration.properties
