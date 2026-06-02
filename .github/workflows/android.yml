@@ -19,7 +19,7 @@ jobs:
         run: |
           sdkmanager "platform-tools" "platforms;android-36"
 
-      - uses: gradle/gradle-build-action@12318b01111bfa6462c00534ffa998f8b397b979
+      - uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70
 
       - name: Build & Lint & Unit tests
         run: |
