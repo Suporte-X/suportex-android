@@ -13,6 +13,7 @@ import com.suportex.app.Conn
 import com.suportex.app.data.model.Message
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -209,11 +210,6 @@ class ChatRepository {
         fallbackPrefix: String,
         maxBytes: Long
     ): UploadedMedia {
-        val token = authRepository.ensureAnonIdToken(forceRefresh = false)
-        if (token.isBlank()) {
-            throw IllegalStateException("N\u00e3o foi poss\u00edvel autenticar upload.")
-        }
-
         val fileName = resolveFileName(localUri, fallbackPrefix)
         val contentType = resolveContentType(localUri, fallbackMime)
         val bytes = readBytes(localUri)
@@ -232,48 +228,94 @@ class ChatRepository {
             .addFormDataPart("file", fileName, requestBody)
             .build()
 
-        val request = Request.Builder()
-            .url(endpoint)
-            .post(body)
-            .header("Authorization", "Bearer $token")
-            .build()
+        var lastError: Throwable? = null
+        repeat(2) { attempt ->
+            if (attempt > 0) {
+                warmUpBackend()
+                delay(700)
+            }
 
-        val response = httpClient.newCall(request).await()
-        response.use { res ->
-            val payload = res.body?.string().orEmpty()
-            val json = runCatching {
-                if (payload.isBlank()) JSONObject() else JSONObject(payload)
-            }.getOrDefault(JSONObject())
+            val token = authRepository.ensureAnonIdToken(forceRefresh = attempt > 0)
+            if (token.isBlank()) {
+                throw IllegalStateException("N\u00e3o foi poss\u00edvel autenticar upload.")
+            }
 
-            if (!res.isSuccessful) {
-                val err = json.optString("error").ifBlank {
-                    json.optString("message").ifBlank { "Falha no upload via backend" }
+            val request = Request.Builder()
+                .url(endpoint)
+                .post(body)
+                .header("Authorization", "Bearer $token")
+                .build()
+
+            val result = runCatching {
+                httpClient.newCall(request).await().use { res ->
+                    parseUploadResponse(
+                        response = res,
+                        fallbackContentType = contentType,
+                        fallbackSize = bytes.size.toLong(),
+                        fallbackFileName = fileName
+                    )
                 }
-                throw IllegalStateException("$err (HTTP ${res.code})")
             }
 
-            val upload = json.optJSONObject("upload") ?: json
-            val downloadURL = upload.optString("downloadURL")
-                .ifBlank { upload.optString("downloadUrl") }
-                .ifBlank { upload.optString("url") }
-            if (downloadURL.isBlank()) {
-                throw IllegalStateException("Upload conclu\u00eddo sem URL de download.")
+            result.onSuccess { return it }
+            lastError = result.exceptionOrNull()
+            Log.w(TAG, "uploadSessionMedia failed attempt=${attempt + 1}", lastError)
+        }
+
+        throw lastError ?: IllegalStateException("Falha no upload via backend")
+    }
+
+    private fun parseUploadResponse(
+        response: okhttp3.Response,
+        fallbackContentType: String,
+        fallbackSize: Long,
+        fallbackFileName: String
+    ): UploadedMedia {
+        val payload = response.body?.string().orEmpty()
+        val json = runCatching {
+            if (payload.isBlank()) JSONObject() else JSONObject(payload)
+        }.getOrDefault(JSONObject())
+
+        if (!response.isSuccessful) {
+            val err = json.optString("error").ifBlank {
+                json.optString("message").ifBlank { "Falha no upload via backend" }
             }
+            throw IllegalStateException("$err (HTTP ${response.code})")
+        }
 
-            val uploadedMime = upload.optString("contentType")
-                .ifBlank { contentType }
-                .trim()
-                .lowercase()
-            val uploadedSize = upload.optLong("size", bytes.size.toLong())
-            val uploadedName = upload.optString("fileName")
-                .ifBlank { fileName }
+        val upload = json.optJSONObject("upload") ?: json
+        val downloadURL = upload.optString("downloadURL")
+            .ifBlank { upload.optString("downloadUrl") }
+            .ifBlank { upload.optString("url") }
+        if (downloadURL.isBlank()) {
+            throw IllegalStateException("Upload conclu\u00eddo sem URL de download.")
+        }
 
-            return UploadedMedia(
-                downloadURL = downloadURL,
-                contentType = uploadedMime,
-                size = uploadedSize,
-                fileName = uploadedName
-            )
+        val uploadedMime = upload.optString("contentType")
+            .ifBlank { fallbackContentType }
+            .trim()
+            .lowercase()
+        val uploadedSize = upload.optLong("size", fallbackSize)
+        val uploadedName = upload.optString("fileName")
+            .ifBlank { fallbackFileName }
+
+        return UploadedMedia(
+            downloadURL = downloadURL,
+            contentType = uploadedMime,
+            size = uploadedSize,
+            fileName = uploadedName
+        )
+    }
+
+    private suspend fun warmUpBackend() {
+        runCatching {
+            val request = Request.Builder()
+                .url("${Conn.SERVER_BASE}/healthz")
+                .get()
+                .build()
+            httpClient.newCall(request).await().close()
+        }.onFailure { err ->
+            Log.w(TAG, "warmUpBackend failed before upload retry", err)
         }
     }
 

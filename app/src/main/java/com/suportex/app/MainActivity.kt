@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.Manifest
 import android.app.AlertDialog
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.app.ActivityManager
 import android.media.AudioAttributes
@@ -92,6 +93,12 @@ import com.suportex.app.ui.screens.SessionFeedbackScreen
 import com.suportex.app.ui.screens.SessionScreen
 import com.suportex.app.ui.screens.StartupLoadingScreen
 import com.suportex.app.ui.screens.SupportHomeScreen
+import com.google.android.play.core.appupdate.AppUpdateInfo
+import com.google.android.play.core.appupdate.AppUpdateManager
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.UpdateAvailability
 import io.socket.client.IO
 import io.socket.client.Socket
 import okhttp3.*
@@ -163,6 +170,7 @@ class MainActivity : ComponentActivity() {
     private val clientSupportRepository = ClientSupportRepository()
     private val phoneIdentityProvider by lazy { FirebasePhoneIdentityProvider(applicationContext) }
     private val supportFlowFlags = SupportFlowFlags()
+    private lateinit var appUpdateManager: AppUpdateManager
 
     // Bridges Activity -> Compose (ja existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
@@ -192,6 +200,7 @@ class MainActivity : ComponentActivity() {
     private var callConnectedActive = false
     private var shareRequestFromCommand = false
     private var remoteConsentAcceptedForCurrentSession = false
+    private var pendingRemoteEnableAfterAccessibility = false
     private var pendingAudioAction: (() -> Unit)? = null
     private var mediaRecorder: MediaRecorder? = null
     private var audioTempFile: File? = null
@@ -211,6 +220,9 @@ class MainActivity : ComponentActivity() {
     private var currentCallDirection: CallDirection? = null
     private var incomingCallRingtone: Ringtone? = null
     private var incomingCallAlertActive = false
+    private var appUpdateCheckInProgress = false
+    private var appUpdatePromptVisible = false
+    private var appUpdatePromptShownThisLaunch = false
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -619,23 +631,24 @@ class MainActivity : ComponentActivity() {
         }
 
         val message = """
-            Para que o suporte tecnico possa ser realizado, o aplicativo Suporte X pode solicitar permissoes temporarias como:
-            
-            - compartilhamento de tela
-            - acesso assistido ao dispositivo
-            - envio de arquivos e informacoes tecnicas
-            
-            Essas permissoes sao utilizadas exclusivamente durante a sessao de suporte tecnico.
-            
-            O acesso remoto somente sera iniciado apos sua autorizacao explicita e pode ser interrompido a qualquer momento diretamente no aplicativo.
-            
-            Nenhuma acao sera realizada no dispositivo sem a autorizacao do usuario.
-            
-            Ao continuar, voce confirma que esta solicitando suporte tecnico e autoriza temporariamente o acesso necessario para a realizacao do atendimento.
+            O Suporte X usa permissões temporárias somente durante uma sessão de suporte iniciada por você.
+
+            Para permitir o atendimento, o app pode solicitar:
+
+            - compartilhamento de tela, para o técnico visualizar o problema;
+            - Serviço de Acessibilidade, para executar toques, rolagens, botão voltar/home e digitação assistida quando você autorizar o acesso remoto;
+            - leitura do campo de texto em foco apenas para permitir digitação remota durante o suporte;
+            - envio de arquivos e informações técnicas da sessão.
+
+            Essas informações podem ser visualizadas pelo técnico responsável apenas durante o atendimento. O Suporte X não usa o Serviço de Acessibilidade para publicidade, monitoramento oculto, coleta fora da sessão ou ações sem autorização.
+
+            Você pode recusar, parar o compartilhamento, desligar o acesso remoto ou encerrar o suporte a qualquer momento.
+
+            Ao continuar, você confirma que entendeu e autoriza temporariamente as permissões necessárias para o atendimento.
         """.trimIndent()
 
         android.app.AlertDialog.Builder(this)
-            .setTitle("Autorizacao de Acesso Remoto")
+            .setTitle("Autorização de acesso remoto")
             .setMessage(message)
             .setCancelable(true)
             .setNegativeButton("Cancelar") { dialog, _ ->
@@ -653,20 +666,52 @@ class MainActivity : ComponentActivity() {
         if (enabled) {
             ensureRemoteAccessConsent {
                 if (!isAccessibilityServiceEnabled()) {
+                    pendingRemoteEnableAfterAccessibility = true
                     openAccessibilitySettings()
                     setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > Suporte X > Ativar para permitir o controle remoto.")
                     updateRemoteState(enabled = false, origin = "client")
                     sendCommand("remote_revoke")
                     return@ensureRemoteAccessConsent
                 }
+                pendingRemoteEnableAfterAccessibility = false
                 updateRemoteState(enabled = true, origin = "client")
                 sendCommand("remote_enable")
             }
             return
         }
 
+        pendingRemoteEnableAfterAccessibility = false
         updateRemoteState(enabled = false, origin = "client")
         sendCommand("remote_revoke")
+    }
+
+    private fun reconcileRemoteAccessAfterResume() {
+        val sid = currentSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (sid == null) {
+            pendingRemoteEnableAfterAccessibility = false
+            return
+        }
+
+        val accessibilityEnabled = isAccessibilityServiceEnabled()
+        if (accessibilityEnabled && (pendingRemoteEnableAfterAccessibility || remoteEnabledActive)) {
+            pendingRemoteEnableAfterAccessibility = false
+            if (!remoteEnabledActive) {
+                updateRemoteState(enabled = true, origin = "client")
+            } else {
+                RemoteCommandBus.setRemoteEnabled(true)
+                pushSessionState()
+                emitTelemetry()
+            }
+            sendCommand("remote_enable")
+            setSystemMessageFromLauncher?.invoke("Acesso remoto autorizado para esta sessao.")
+            return
+        }
+
+        if (!accessibilityEnabled && remoteEnabledActive) {
+            updateRemoteState(enabled = false, origin = "system")
+            sendCommand("remote_revoke")
+            setSystemMessageFromLauncher?.invoke("Acessibilidade desativada. Acesso remoto interrompido.")
+        }
     }
 
     private fun updateCallState(calling: Boolean, connected: Boolean, origin: String) {
@@ -1697,6 +1742,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestCallStart() {
+        val sid = currentSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (sid == null) {
+            setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
+            return
+        }
+        voiceCallManager.bindSession(sid)
+        warmUpBackendForSupport()
         ensureAudioPermission {
             voiceCallManager.startOutgoingCall()
         }
@@ -2086,6 +2138,31 @@ class MainActivity : ComponentActivity() {
         socket.connect()
     }
 
+    private fun warmUpBackendForSupport() {
+        runCatching {
+            val request = Request.Builder()
+                .url("${Conn.SERVER_BASE}/healthz")
+                .get()
+                .build()
+            http.newCall(request).execute().use { response ->
+                Log.d("SXS/Main", "Backend warmup status=${response.code}")
+            }
+        }.onFailure { err ->
+            Log.w("SXS/Main", "Backend warmup falhou", err)
+        }
+    }
+
+    private suspend fun ensureSupportSocketReady(): Boolean {
+        if (!::socket.isInitialized) return false
+        if (socket.connected()) return true
+        runCatching { socket.connect() }
+        repeat(16) {
+            if (socket.connected()) return true
+            delay(500)
+        }
+        return socket.connected()
+    }
+
     private fun loadHomeSnapshot(onResult: (ClientHomeSnapshot) -> Unit) {
         lifecycleScope.launch(Dispatchers.IO) {
             val clientUid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
@@ -2174,6 +2251,13 @@ class MainActivity : ComponentActivity() {
             }.getOrNull()
             setPendingSupportSession(localSupportSessionId)
             startWaitingSessionRecovery()
+            warmUpBackendForSupport()
+            val socketReady = ensureSupportSocketReady()
+            if (!socketReady) {
+                runOnUiThread {
+                    setSystemMessageFromLauncher?.invoke("Servidor conectando. Se nao aparecer na fila, toque em solicitar novamente em alguns segundos.")
+                }
+            }
 
             val payload = JSONObject().apply {
                 put("clientName", clientName ?: "Cliente em atendimento")
@@ -2337,8 +2421,24 @@ class MainActivity : ComponentActivity() {
         }
         shareRequestFromCommand = fromCommand
         ensureRemoteAccessConsent {
-            val intent = mediaProjectionManager.createScreenCaptureIntent()
+            setSystemMessageFromLauncher?.invoke("Ao compartilhar, selecione a tela inteira do dispositivo.")
+            val intent = createScreenCaptureIntentForSupport()
             screenCaptureLauncher.launch(intent)
+        }
+    }
+
+    private fun createScreenCaptureIntentForSupport(): Intent {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching {
+                mediaProjectionManager.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay()
+                )
+            }.getOrElse {
+                Log.w("SXS/Main", "Falha ao criar intent de captura de tela inteira", it)
+                mediaProjectionManager.createScreenCaptureIntent()
+            }
+        } else {
+            mediaProjectionManager.createScreenCaptureIntent()
         }
     }
 
@@ -2392,6 +2492,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val appUpdateLauncher =
+        registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+            appUpdatePromptVisible = false
+            if (result.resultCode != RESULT_OK) {
+                Toast.makeText(
+                    this,
+                    "Atualizacao nao concluida. Abra a Play Store para atualizar o Suporte X.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
     private val audioPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
@@ -2410,6 +2522,94 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             uri?.let { handleAttachmentPick(it) }
         }
+
+    private fun checkForPlayStoreUpdate() {
+        if (!::appUpdateManager.isInitialized || appUpdateCheckInProgress) return
+        appUpdateCheckInProgress = true
+        appUpdateManager.appUpdateInfo
+            .addOnSuccessListener { appUpdateInfo ->
+                appUpdateCheckInProgress = false
+
+                val updateInProgress =
+                    appUpdateInfo.updateAvailability() ==
+                        UpdateAvailability.DEVELOPER_TRIGGERED_UPDATE_IN_PROGRESS
+                if (updateInProgress && appUpdateInfo.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE)) {
+                    startPlayStoreUpdate(appUpdateInfo, AppUpdateType.IMMEDIATE)
+                    return@addOnSuccessListener
+                }
+
+                if (appUpdatePromptShownThisLaunch) return@addOnSuccessListener
+                if (appUpdateInfo.updateAvailability() != UpdateAvailability.UPDATE_AVAILABLE) {
+                    return@addOnSuccessListener
+                }
+
+                val updateType = when {
+                    appUpdateInfo.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE) -> AppUpdateType.IMMEDIATE
+                    appUpdateInfo.isUpdateTypeAllowed(AppUpdateType.FLEXIBLE) -> AppUpdateType.FLEXIBLE
+                    else -> null
+                } ?: return@addOnSuccessListener
+
+                appUpdatePromptShownThisLaunch = true
+                showPlayStoreUpdatePrompt(appUpdateInfo, updateType)
+            }
+            .addOnFailureListener { err ->
+                appUpdateCheckInProgress = false
+                Log.w("SXS/Main", "Falha ao verificar atualizacao pela Play Store", err)
+            }
+    }
+
+    private fun showPlayStoreUpdatePrompt(appUpdateInfo: AppUpdateInfo, updateType: Int) {
+        if (isFinishing || isDestroyed || appUpdatePromptVisible) return
+        appUpdatePromptVisible = true
+        AlertDialog.Builder(this)
+            .setTitle("Existe uma nova versao")
+            .setMessage("Atualize para continuar usando o Suporte X com as correcoes mais recentes.")
+            .setPositiveButton("Atualizar agora") { dialog, _ ->
+                dialog.dismiss()
+                startPlayStoreUpdate(appUpdateInfo, updateType)
+            }
+            .setNegativeButton("Depois") { dialog, _ ->
+                appUpdatePromptVisible = false
+                dialog.dismiss()
+            }
+            .setOnCancelListener {
+                appUpdatePromptVisible = false
+            }
+            .show()
+    }
+
+    private fun startPlayStoreUpdate(appUpdateInfo: AppUpdateInfo, updateType: Int) {
+        appUpdatePromptVisible = false
+        runCatching {
+            appUpdateManager.startUpdateFlowForResult(
+                appUpdateInfo,
+                appUpdateLauncher,
+                AppUpdateOptions.newBuilder(updateType).build()
+            )
+        }.onFailure { err ->
+            Log.w("SXS/Main", "Falha ao iniciar atualizacao pela Play Store", err)
+            openPlayStoreListing()
+        }
+    }
+
+    private fun openPlayStoreListing() {
+        val marketIntent = Intent(
+            Intent.ACTION_VIEW,
+            "market://details?id=$packageName".toUri()
+        ).apply {
+            setPackage("com.android.vending")
+        }
+        val webIntent = Intent(
+            Intent.ACTION_VIEW,
+            "https://play.google.com/store/apps/details?id=$packageName".toUri()
+        )
+        runCatching { startActivity(marketIntent) }
+            .recoverCatching { startActivity(webIntent) }
+            .onFailure { err ->
+                Log.w("SXS/Main", "Falha ao abrir pagina do app na Play Store", err)
+                Toast.makeText(this, "Abra a Play Store para atualizar o Suporte X.", Toast.LENGTH_LONG).show()
+            }
+    }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
         return AccessibilityUtils.isServiceEnabled(this, com.suportex.app.remote.RemoteControlService::class.java)
@@ -2441,6 +2641,7 @@ class MainActivity : ComponentActivity() {
             runCatching { clientSupportRepository.seedDefaultPackagesIfNeeded() }
         }
         mediaProjectionManager = getSystemService(MediaProjectionManager::class.java)
+        appUpdateManager = AppUpdateManagerFactory.create(this)
 
         voiceCallManager = VoiceCallManager(
             context = this,
@@ -2683,6 +2884,7 @@ class MainActivity : ComponentActivity() {
                     setSessionIdFromSocket = { sid ->
                         sessionId = sid
                         currentSessionId = sid
+                        voiceCallManager.bindSession(sid)
                     }
                     setScreenFromSocket = { scr -> current = scr }
                     setRemoteEnabledFromSocket = { remoteEnabled = it }
@@ -2761,7 +2963,12 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                Surface(
+                    Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
                     Box(Modifier.fillMaxSize()) {
                         if (showMainContent) {
                             when (current) {
@@ -2958,10 +3165,12 @@ class MainActivity : ComponentActivity() {
         appInForeground = true
         syncWaitingSupportForegroundService()
         syncSessionAnchorForegroundService()
+        reconcileRemoteAccessAfterResume()
         if (!currentSessionId.isNullOrBlank()) {
             clearTransientSupportNotifications(currentSessionId)
         }
         maybePromptInitialCriticalPermissions()
+        checkForPlayStoreUpdate()
         val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
             currentCallDirection == CallDirection.TECH_TO_CLIENT
         if (incomingFromTech) {

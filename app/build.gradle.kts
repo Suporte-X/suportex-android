@@ -14,8 +14,8 @@ android {
         applicationId = "com.suportex.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -81,4 +81,5 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.coil.compose)
     implementation(libs.lottie.compose)
+    implementation(libs.google.play.app.update)
 }
