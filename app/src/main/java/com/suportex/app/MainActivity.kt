@@ -418,7 +418,8 @@ class MainActivity : ComponentActivity() {
     private fun launchPnvVerificationFlow(
         clientUid: String,
         startContext: SupportStartContext,
-        localSupportSessionId: String?
+        localSupportSessionId: String?,
+        realtimeSessionId: String? = null
     ) {
         if (pnvFlowInProgress) return
         lifecycleScope.launch {
@@ -431,7 +432,9 @@ class MainActivity : ComponentActivity() {
                             verifiedPhone = cachedPhone,
                             token = null,
                             localSupportSessionId = localSupportSessionId,
-                            deviceAnchor = deviceAnchor()
+                            deviceAnchor = deviceAnchor(),
+                            clientId = startContext.clientId,
+                            realtimeSessionId = realtimeSessionId
                         )
                     }
                 }
@@ -472,7 +475,9 @@ class MainActivity : ComponentActivity() {
                                     verifiedPhone = verificationResult.phoneNumber,
                                     token = verificationResult.token,
                                     localSupportSessionId = localSupportSessionId,
-                                    deviceAnchor = deviceAnchor()
+                                    deviceAnchor = deviceAnchor(),
+                                    clientId = startContext.clientId,
+                                    realtimeSessionId = realtimeSessionId
                                 )
                             }
                         }
@@ -2094,6 +2099,7 @@ class MainActivity : ComponentActivity() {
             val serverClientUid = data.optString("clientUid", "").trim().takeIf { it.isNotBlank() }
             val serverClientId = data.optString("clientId", "").trim().takeIf { it.isNotBlank() }
             val serverPhone = data.optString("phone", "").trim().takeIf { it.isNotBlank() }
+            val serverRealtimeSessionId = data.optString("sessionId", "").trim().takeIf { it.isNotBlank() }
             val serverSupportSessionId = data.optString("supportSessionId", "").trim().takeIf { it.isNotBlank() }
 
             lifecycleScope.launch(Dispatchers.IO) {
@@ -2114,7 +2120,8 @@ class MainActivity : ComponentActivity() {
                     launchPnvVerificationFlow(
                         clientUid = resolvedUid,
                         startContext = startContext,
-                        localSupportSessionId = serverSupportSessionId ?: pendingSupportSessionId
+                        localSupportSessionId = serverSupportSessionId ?: pendingSupportSessionId,
+                        realtimeSessionId = serverRealtimeSessionId
                     )
                 }
             }
@@ -2293,7 +2300,8 @@ class MainActivity : ComponentActivity() {
                             verifiedPhone = verifiedPhone,
                             token = null,
                             localSupportSessionId = pendingSupportSessionId,
-                            deviceAnchor = currentDeviceAnchor
+                            deviceAnchor = currentDeviceAnchor,
+                            clientId = startContext.clientId
                         )
                 }
             } else {

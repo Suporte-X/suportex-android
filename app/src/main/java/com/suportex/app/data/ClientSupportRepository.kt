@@ -22,7 +22,9 @@ import com.suportex.app.data.model.SupportSessionRecord
 import com.suportex.app.data.model.SupportStartContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.Date
 import kotlin.coroutines.resume
@@ -627,10 +629,34 @@ class ClientSupportRepository(
         verifiedPhone: String,
         token: String?,
         localSupportSessionId: String?,
-        deviceAnchor: String?
+        deviceAnchor: String?,
+        clientId: String? = null,
+        realtimeSessionId: String? = null
     ): ClientRecord? {
         authRepository.ensureAnonAuth()
         val normalizedPhone = normalizePhone(verifiedPhone) ?: return null
+        if (!token.isNullOrBlank()) {
+            val acceptedByBackend = submitPnvResultToBackend(
+                clientUid = clientUid,
+                clientId = clientId,
+                verifiedPhone = normalizedPhone,
+                token = token,
+                localSupportSessionId = localSupportSessionId,
+                deviceAnchor = deviceAnchor,
+                realtimeSessionId = realtimeSessionId
+            )
+            if (acceptedByBackend) return null
+            registerPnvAttempt(
+                clientUid = clientUid,
+                clientId = clientId,
+                fallbackPhone = normalizedPhone,
+                status = PNV_REQUEST_STATUS_PENDING,
+                manualFallback = false,
+                reason = "pnv_server_verification_failed",
+                deviceAnchor = deviceAnchor
+            )
+            return null
+        }
         val now = System.currentTimeMillis()
         val pnvRequestExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_PNV_REQUESTS)
         val sanitizedUid = clientUid?.trim()?.takeIf { it.isNotBlank() }
@@ -695,6 +721,49 @@ class ClientSupportRepository(
         )?.await()
 
         return clients.document(ensured.client.id).get().await().toClientRecord()
+    }
+
+    private suspend fun submitPnvResultToBackend(
+        clientUid: String?,
+        clientId: String?,
+        verifiedPhone: String,
+        token: String,
+        localSupportSessionId: String?,
+        deviceAnchor: String?,
+        realtimeSessionId: String?
+    ): Boolean {
+        val idToken = authRepository.ensureAnonIdToken(forceRefresh = false).trim()
+        if (idToken.isBlank()) return false
+
+        val payload = JSONObject().apply {
+            put("clientUid", clientUid?.trim().orEmpty())
+            put("clientId", clientId?.trim().orEmpty())
+            put("phone", verifiedPhone)
+            put("token", token)
+            put("sessionId", realtimeSessionId?.trim().orEmpty())
+            put("supportSessionId", localSupportSessionId?.trim().orEmpty())
+            put("deviceAnchor", deviceAnchor?.trim().orEmpty())
+        }
+        val request = Request.Builder()
+            .url("${Conn.SERVER_BASE}/api/client-context/verification/pnv-result")
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull()))
+            .header("Authorization", "Bearer $idToken")
+            .build()
+
+        return runCatching {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w("SXS/ClientRepo", "PNV backend verification failed status=${response.code}")
+                    return@use false
+                }
+                val body = response.body?.string().orEmpty()
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                json?.optBoolean("ok", false) == true
+            }
+        }.getOrElse { error ->
+            Log.w("SXS/ClientRepo", "PNV backend verification request failed", error)
+            false
+        }
     }
 
     suspend fun registerCreditOrderIntent(
