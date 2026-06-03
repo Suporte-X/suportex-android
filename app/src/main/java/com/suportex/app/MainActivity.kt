@@ -1256,13 +1256,7 @@ class MainActivity : ComponentActivity() {
         stopIncomingCallAlert()
         stopWaitingSupportForegroundService()
         stopSessionAnchorForegroundService()
-        val stopCaptureIntent = Intent(this, ScreenCaptureService::class.java).apply {
-            action = ScreenCaptureService.ACTION_STOP
-        }
-        runCatching { ContextCompat.startForegroundService(this, stopCaptureIntent) }
-            .onFailure { err ->
-                Log.w("SXS/Main", "Falha ao parar captura durante limpeza final", err)
-            }
+        requestScreenCaptureServiceStop("limpeza final")
         runCatching {
             getSystemService(NotificationManager::class.java)?.cancelAll()
         }.onFailure { err ->
@@ -2483,12 +2477,30 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun stopScreenShare(fromCommand: Boolean = false, originOverride: String? = null) {
+        requestScreenCaptureServiceStop("parar compartilhamento")
+        val origin = originOverride ?: if (fromCommand) "tech" else "client"
+        updateSharingState(active = false, origin = origin)
+    }
+
+    private fun requestScreenCaptureServiceStop(reason: String) {
         val stop = Intent(this, ScreenCaptureService::class.java).apply {
             action = ScreenCaptureService.ACTION_STOP
         }
-        ContextCompat.startForegroundService(this, stop)
-        val origin = originOverride ?: if (fromCommand) "tech" else "client"
-        updateSharingState(active = false, origin = origin)
+        if (isScreenCaptureServiceRunning()) {
+            runCatching { startService(stop) }
+                .onFailure { err ->
+                    Log.w("SXS/Main", "Falha ao enviar stop da captura ($reason)", err)
+                    runCatching { stopService(stop) }
+                        .onFailure { stopErr ->
+                            Log.w("SXS/Main", "Falha ao parar servico de captura ($reason)", stopErr)
+                        }
+                }
+        } else {
+            runCatching { stopService(stop) }
+                .onFailure { err ->
+                    Log.w("SXS/Main", "Falha ao parar captura inativa ($reason)", err)
+                }
+        }
     }
 
     private fun ensureAudioPermission(onGranted: () -> Unit) {
@@ -2630,16 +2642,21 @@ class MainActivity : ComponentActivity() {
         startActivity(intent)
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        handleLaunchIntent(intent)
-        val appBackgroundArgb = Color(0xFFF4F6F8).toArgb()
-        window.statusBarColor = appBackgroundArgb
-        window.navigationBarColor = appBackgroundArgb
+    @Suppress("DEPRECATION")
+    private fun configureSystemBars(backgroundArgb: Int) {
+        window.statusBarColor = backgroundArgb
+        window.navigationBarColor = backgroundArgb
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isStatusBarContrastEnforced = false
             window.isNavigationBarContrastEnforced = false
         }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handleLaunchIntent(intent)
+        val appBackgroundArgb = Color(0xFFF4F6F8).toArgb()
+        configureSystemBars(appBackgroundArgb)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true

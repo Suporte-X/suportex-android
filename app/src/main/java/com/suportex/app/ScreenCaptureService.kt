@@ -43,6 +43,7 @@ class ScreenCaptureService : Service() {
     }
 
     private var started = false
+    private var stopping = false
 
     // WebRTC / captura
     private var capturer: ScreenCapturerAndroid? = null
@@ -72,7 +73,6 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startAsForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -95,6 +95,7 @@ class ScreenCaptureService : Service() {
                 }
 
                 try {
+                    startAsForeground()
                     roomCode = room
 
                     val projectionCallback = object : MediaProjection.Callback() {
@@ -763,6 +764,8 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopSelfSafe() {
+        if (stopping) return
+        stopping = true
         pingRunnable?.let { mainHandler.removeCallbacks(it) }
         pingRunnable = null
         statsRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -804,7 +807,7 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
-        stopSelfSafe()
+        if (!stopping) stopSelfSafe()
         super.onDestroy()
     }
 
