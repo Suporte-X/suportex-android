@@ -118,6 +118,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -2140,6 +2141,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun warmUpBackendForSupport() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            warmUpBackendForSupportBlocking()
+        }
+    }
+
+    private suspend fun warmUpBackendForSupportBlocking(): Unit = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder()
                 .url("${Conn.SERVER_BASE}/healthz")
@@ -2151,6 +2158,7 @@ class MainActivity : ComponentActivity() {
         }.onFailure { err ->
             Log.w("SXS/Main", "Backend warmup falhou", err)
         }
+        Unit
     }
 
     private suspend fun ensureSupportSocketReady(): Boolean {
@@ -2252,7 +2260,7 @@ class MainActivity : ComponentActivity() {
             }.getOrNull()
             setPendingSupportSession(localSupportSessionId)
             startWaitingSessionRecovery()
-            warmUpBackendForSupport()
+            warmUpBackendForSupportBlocking()
             val socketReady = ensureSupportSocketReady()
             if (!socketReady) {
                 runOnUiThread {
