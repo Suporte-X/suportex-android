@@ -1,4 +1,4 @@
-﻿import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -8,14 +8,14 @@ plugins {
 
 android {
     namespace = "com.suportex.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.suportex.app"
         minSdk = 24
-        targetSdk = 35
-        versionCode = 7
-        versionName = "1.1.3"
+        targetSdk = 37
+        versionCode = 8
+        versionName = "1.1.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

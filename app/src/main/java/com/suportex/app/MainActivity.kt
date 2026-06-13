@@ -2,6 +2,7 @@ package com.suportex.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.content.Intent
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
@@ -116,6 +118,8 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -232,10 +236,11 @@ class MainActivity : ComponentActivity() {
         val cur = p.getString("device_id", null)
         if (cur != null) return cur
         val gen = UUID.randomUUID().toString()
-        p.edit().putString("device_id", gen).apply()
+        p.edit { putString("device_id", gen) }
         return gen
     }
 
+    @SuppressLint("HardwareIds")
     private fun deviceAnchor(): String {
         val androidId = runCatching {
             Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
@@ -264,9 +269,9 @@ class MainActivity : ComponentActivity() {
     private fun writePendingSupportSessionToPrefs(localSupportSessionId: String?) {
         val prefs = getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
         if (localSupportSessionId.isNullOrBlank()) {
-            prefs.edit().remove(KEY_PENDING_SUPPORT_SESSION_ID).apply()
+            prefs.edit { remove(KEY_PENDING_SUPPORT_SESSION_ID) }
         } else {
-            prefs.edit().putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId).apply()
+            prefs.edit { putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId) }
         }
     }
 
@@ -653,7 +658,7 @@ class MainActivity : ComponentActivity() {
             Ao continuar, você confirma que entendeu e autoriza temporariamente as permissões necessárias para o atendimento.
         """.trimIndent()
 
-        android.app.AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle("Autorização de acesso remoto")
             .setMessage(message)
             .setCancelable(true)
@@ -835,7 +840,7 @@ class MainActivity : ComponentActivity() {
         telemetryJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 emitTelemetry()
-                delay(5_000)
+                delay(5.seconds)
             }
         }
     }
@@ -1006,13 +1011,12 @@ class MainActivity : ComponentActivity() {
     private fun ensureNotificationChannel(
         id: String,
         name: String,
-        description: String,
-        importance: Int
+        description: String
     ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = getSystemService(NotificationManager::class.java) ?: return
         if (manager.getNotificationChannel(id) != null) return
-        val channel = NotificationChannel(id, name, importance).apply {
+        val channel = NotificationChannel(id, name, NotificationManager.IMPORTANCE_HIGH).apply {
             this.description = description
             enableVibration(true)
         }
@@ -1025,7 +1029,7 @@ class MainActivity : ComponentActivity() {
 
         val prefs = getSharedPreferences(PREFS_RUNTIME_PERMISSIONS, MODE_PRIVATE)
         if (prefs.getBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, false)) return
-        prefs.edit().putBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, true).apply()
+        prefs.edit { putBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, true) }
 
         val runtimePermissions = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -1120,12 +1124,12 @@ class MainActivity : ComponentActivity() {
             val activeRealtimeSession = runCatching {
                 clientSupportRepository.findActiveRealtimeSession(pendingSupportSessionId)
             }.getOrNull()
-            val canOpenSession = activeRealtimeSession?.sessionId
-                ?.trim()
-                ?.equals(normalizedSessionId, ignoreCase = false) == true
+            val sessionToOpen = activeRealtimeSession?.takeIf {
+                it.sessionId.trim() == normalizedSessionId
+            }
             runOnUiThread {
                 clearTransientSupportNotifications(normalizedSessionId)
-                if (!canOpenSession) {
+                if (sessionToOpen == null) {
                     if (currentSessionId.isNullOrBlank()) {
                         setScreenFromSocket?.invoke(Screen.HOME)
                     }
@@ -1134,7 +1138,7 @@ class MainActivity : ComponentActivity() {
                 }
                 handleSupportAccepted(
                     sessionId = normalizedSessionId,
-                    techName = activeRealtimeSession?.techName,
+                    techName = sessionToOpen.techName,
                     source = "chat_notification_validation"
                 )
             }
@@ -1157,8 +1161,7 @@ class MainActivity : ComponentActivity() {
         ensureNotificationChannel(
             id = CHAT_NOTIFICATION_CHANNEL_ID,
             name = "Mensagens do atendimento",
-            description = "Notificacoes de novas mensagens durante o suporte.",
-            importance = NotificationManager.IMPORTANCE_HIGH
+            description = "Notificacoes de novas mensagens durante o suporte."
         )
 
         val openIntent = Intent(this, MainActivity::class.java).apply {
@@ -1222,34 +1225,23 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            manager.activeNotifications.forEach { active ->
-                val notificationId = active.id
-                val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    active.notification.channelId
-                } else {
-                    null
-                }
-                val isPersistentForeground = notificationId == 1 ||
-                    notificationId == 6_100 ||
-                    notificationId == 6_200 ||
-                    channelId == "screen_capture" ||
-                    channelId == "suportex_waiting_queue" ||
-                    channelId == "suportex_session_anchor" ||
-                    channelId == "suportex_session_anchor_v2"
-                if (!isPersistentForeground) {
-                    manager.cancel(notificationId)
-                }
+        manager.activeNotifications.forEach { active ->
+            val notificationId = active.id
+            val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                active.notification.channelId
+            } else {
+                null
             }
-            return
-        }
-
-        for (offset in 0 until 900) {
-            manager.cancel(2_000 + offset)
-            manager.cancel(3_000 + offset)
-            manager.cancel(3_500 + offset)
-            manager.cancel(3_600 + offset)
-            manager.cancel(4_000 + offset)
+            val isPersistentForeground = notificationId == 1 ||
+                notificationId == 6_100 ||
+                notificationId == 6_200 ||
+                channelId == "screen_capture" ||
+                channelId == "suportex_waiting_queue" ||
+                channelId == "suportex_session_anchor" ||
+                channelId == "suportex_session_anchor_v2"
+            if (!isPersistentForeground) {
+                manager.cancel(notificationId)
+            }
         }
     }
 
@@ -1411,8 +1403,7 @@ class MainActivity : ComponentActivity() {
         ensureNotificationChannel(
             id = SESSION_NOTIFICATION_CHANNEL_ID,
             name = "Atualizacoes do atendimento",
-            description = "Notificacoes sobre encerramento da sessao de suporte.",
-            importance = NotificationManager.IMPORTANCE_HIGH
+            description = "Notificacoes sobre encerramento da sessao de suporte."
         )
 
         val pendingIntent = buildSessionLaunchPendingIntent(
@@ -1514,8 +1505,7 @@ class MainActivity : ComponentActivity() {
         ensureNotificationChannel(
             id = SESSION_NOTIFICATION_CHANNEL_ID,
             name = "Atualizacoes do atendimento",
-            description = "Notificacoes sobre o inicio e encerramento da sessao de suporte.",
-            importance = NotificationManager.IMPORTANCE_HIGH
+            description = "Notificacoes sobre o inicio e encerramento da sessao de suporte."
         )
 
         val pendingIntent = buildSessionLaunchPendingIntent(
@@ -1571,7 +1561,7 @@ class MainActivity : ComponentActivity() {
                     break
                 }
 
-                delay(WAITING_SESSION_RECOVERY_INTERVAL_MS)
+                delay(WAITING_SESSION_RECOVERY_INTERVAL_MS.milliseconds)
             }
             waitingSessionRecoveryJob = null
         }
@@ -1798,7 +1788,7 @@ class MainActivity : ComponentActivity() {
                     prepare()
                     start()
                 }
-                recorder!! to outFile
+                (recorder ?: throw IllegalStateException("MediaRecorder nao inicializado")) to outFile
             }
             if (result.isFailure) {
                 runCatching {
@@ -1988,10 +1978,10 @@ class MainActivity : ComponentActivity() {
             setRequestIdFromSocket?.invoke(null)
             setSessionIdFromSocket?.invoke(null)
             setEndedSessionForFeedback?.invoke(sid)
-            setScreenFromSocket?.invoke(if (sid.isNullOrBlank()) Screen.HOME else Screen.SESSION_FEEDBACK)
+            setScreenFromSocket?.invoke(if (sid.isBlank()) Screen.HOME else Screen.SESSION_FEEDBACK)
             setSystemMessageFromLauncher?.invoke(null)
         }
-        if (fromCommand && !sid.isNullOrBlank() && !appInForeground) {
+        if (fromCommand && sid.isNotBlank() && !appInForeground) {
             notifySessionEndedByTech(sid, normalizedReason)
             bringAppToForegroundForFeedback(sid)
         }
@@ -2158,7 +2148,6 @@ class MainActivity : ComponentActivity() {
         }.onFailure { err ->
             Log.w("SXS/Main", "Backend warmup falhou", err)
         }
-        Unit
     }
 
     private suspend fun ensureSupportSocketReady(): Boolean {
@@ -2167,7 +2156,7 @@ class MainActivity : ComponentActivity() {
         runCatching { socket.connect() }
         repeat(16) {
             if (socket.connected()) return true
-            delay(500)
+            delay(500.milliseconds)
         }
         return socket.connected()
     }
@@ -2640,7 +2629,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
-        return AccessibilityUtils.isServiceEnabled(this, com.suportex.app.remote.RemoteControlService::class.java)
+        return AccessibilityUtils.isServiceEnabled(this, RemoteControlService::class.java)
     }
 
     private fun openAccessibilitySettings() {
@@ -2747,7 +2736,7 @@ class MainActivity : ComponentActivity() {
                 var showStartupLoading by remember { mutableStateOf(true) }
                 var showMainContent by remember { mutableStateOf(false) }
                 var preloadedSupportDecision by remember { mutableStateOf<SupportAccessDecision?>(null) }
-                var bootstrapCycle by remember { mutableStateOf(0) }
+                var bootstrapCycle by remember { mutableIntStateOf(0) }
                 var hasHandledFirstOnStart by remember { mutableStateOf(false) }
                 var skipInitialHomeRefresh by remember { mutableStateOf(true) }
                 val lifecycleOwner = LocalLifecycleOwner.current
@@ -2882,8 +2871,9 @@ class MainActivity : ComponentActivity() {
                         Screen.PAYMENT_CARD -> current = Screen.PURCHASE_CREDITS
                         Screen.PAYMENT_PIX -> current = Screen.PURCHASE_CREDITS
                         Screen.WAITING -> {
-                            if (requestId != null) {
-                                cancelRequest(requestId!!)
+                            val activeRequestId = requestId
+                            if (activeRequestId != null) {
+                                cancelRequest(activeRequestId)
                             } else {
                                 val localSupportId = pendingSupportSessionId
                                 if (!localSupportId.isNullOrBlank()) {
@@ -2975,7 +2965,7 @@ class MainActivity : ComponentActivity() {
                             loadSupportQueueWaitStats { stats ->
                                 supportQueueWaitStats = stats
                             }
-                            delay(20_000)
+                            delay(20.seconds)
                         }
                     }
                 }
@@ -3088,8 +3078,9 @@ class MainActivity : ComponentActivity() {
 
                         Screen.WAITING -> WaitingScreen(
                             onCancel = {
-                                if (requestId != null) {
-                                    cancelRequest(requestId!!)
+                                val activeRequestId = requestId
+                                if (activeRequestId != null) {
+                                    cancelRequest(activeRequestId)
                                 } else {
                                     val localSupportId = pendingSupportSessionId
                                     if (!localSupportId.isNullOrBlank()) {
@@ -3215,8 +3206,9 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
             currentCallDirection == CallDirection.TECH_TO_CLIENT
-        if (incomingFromTech && !currentSessionId.isNullOrBlank()) {
-            notifyIncomingCallFromTech(currentSessionId!!)
+        val sessionId = currentSessionId
+        if (incomingFromTech && !sessionId.isNullOrBlank()) {
+            notifyIncomingCallFromTech(sessionId)
         } else {
             stopIncomingCallAlert()
         }

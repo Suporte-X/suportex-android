@@ -1,6 +1,7 @@
 package com.suportex.app.data
 
 import android.content.Context
+import androidx.core.content.edit
 
 class ClientIdentityStore(context: Context) {
     private val appContext = context.applicationContext
@@ -15,10 +16,10 @@ class ClientIdentityStore(context: Context) {
     fun getDisplayName(): String? = prefs.getString(KEY_NAME, null)?.takeIf { it.isNotBlank() }
 
     fun save(phone: String, displayName: String?) {
-        prefs.edit()
-            .putString(KEY_PHONE, phone)
-            .putString(KEY_NAME, displayName?.takeIf { it.isNotBlank() })
-            .apply()
+        prefs.edit {
+            putString(KEY_PHONE, phone)
+            putString(KEY_NAME, displayName?.takeIf { it.isNotBlank() })
+        }
     }
 
     private fun migrateLegacyPrefsIfNeeded() {
@@ -31,10 +32,10 @@ class ClientIdentityStore(context: Context) {
         val legacyName = legacyPrefs.getString(KEY_NAME, null)?.takeIf { it.isNotBlank() }
         if (legacyPhone.isNullOrBlank() && legacyName.isNullOrBlank()) return
 
-        prefs.edit()
-            .putString(KEY_PHONE, legacyPhone)
-            .putString(KEY_NAME, legacyName)
-            .apply()
+        prefs.edit {
+            putString(KEY_PHONE, legacyPhone)
+            putString(KEY_NAME, legacyName)
+        }
     }
 
     companion object {

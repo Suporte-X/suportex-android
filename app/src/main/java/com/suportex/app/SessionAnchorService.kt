@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
 import kotlin.math.abs
 
 class SessionAnchorService : Service() {
@@ -135,21 +136,21 @@ class SessionAnchorService : Service() {
 
     private fun writeSessionStateToPrefs(sessionId: String?, techName: String?, startedAtMillis: Long?) {
         val prefs = getSharedPreferences(PREFS_SESSION_ANCHOR, MODE_PRIVATE)
-        val edit = prefs.edit()
-        if (sessionId.isNullOrBlank()) {
-            edit.remove(KEY_SESSION_ID)
-            edit.remove(KEY_TECH_NAME)
-            edit.remove(KEY_STARTED_AT_MILLIS)
-        } else {
-            edit.putString(KEY_SESSION_ID, sessionId)
-            if (techName.isNullOrBlank()) {
-                edit.remove(KEY_TECH_NAME)
+        prefs.edit {
+            if (sessionId.isNullOrBlank()) {
+                remove(KEY_SESSION_ID)
+                remove(KEY_TECH_NAME)
+                remove(KEY_STARTED_AT_MILLIS)
             } else {
-                edit.putString(KEY_TECH_NAME, techName)
+                putString(KEY_SESSION_ID, sessionId)
+                if (techName.isNullOrBlank()) {
+                    remove(KEY_TECH_NAME)
+                } else {
+                    putString(KEY_TECH_NAME, techName)
+                }
+                putLong(KEY_STARTED_AT_MILLIS, (startedAtMillis ?: 0L).coerceAtLeast(0L))
             }
-            edit.putLong(KEY_STARTED_AT_MILLIS, (startedAtMillis ?: 0L).coerceAtLeast(0L))
         }
-        edit.apply()
     }
 
     private data class SessionAnchorState(

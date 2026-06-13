@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
 import com.suportex.app.data.ClientSupportRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -270,17 +271,17 @@ class WaitingSupportMonitorService : Service() {
         startedAtMillis: Long?
     ) {
         val prefs = getSharedPreferences(PREFS_WAITING_SUPPORT, MODE_PRIVATE)
-        val edit = prefs.edit()
-        if (anchorId.isNullOrBlank()) {
-            edit.remove(KEY_WAITING_ANCHOR_ID)
-            edit.remove(KEY_PENDING_SUPPORT_SESSION_ID)
-            edit.remove(KEY_WAITING_STARTED_AT_MILLIS)
-        } else {
-            edit.putString(KEY_WAITING_ANCHOR_ID, anchorId)
-            edit.putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId)
-            edit.putLong(KEY_WAITING_STARTED_AT_MILLIS, (startedAtMillis ?: 0L).coerceAtLeast(0L))
+        prefs.edit {
+            if (anchorId.isNullOrBlank()) {
+                remove(KEY_WAITING_ANCHOR_ID)
+                remove(KEY_PENDING_SUPPORT_SESSION_ID)
+                remove(KEY_WAITING_STARTED_AT_MILLIS)
+            } else {
+                putString(KEY_WAITING_ANCHOR_ID, anchorId)
+                putString(KEY_PENDING_SUPPORT_SESSION_ID, localSupportSessionId)
+                putLong(KEY_WAITING_STARTED_AT_MILLIS, (startedAtMillis ?: 0L).coerceAtLeast(0L))
+            }
         }
-        edit.apply()
     }
 
     private data class WaitingState(
