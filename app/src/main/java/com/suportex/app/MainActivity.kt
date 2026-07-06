@@ -85,6 +85,7 @@ import com.suportex.app.call.CallDirection
 import com.suportex.app.call.CallState
 import com.suportex.app.call.CallUiUpdate
 import com.suportex.app.call.VoiceCallManager
+import com.suportex.app.engagement.GooglePlayReviewPrompt
 import com.suportex.app.remote.AccessibilityUtils
 import com.suportex.app.remote.RemoteCommandBus
 import com.suportex.app.remote.RemoteControlService
@@ -174,6 +175,7 @@ class MainActivity : ComponentActivity() {
     private val authRepository = AuthRepository()
     private val clientSupportRepository = ClientSupportRepository()
     private val phoneIdentityProvider by lazy { FirebasePhoneIdentityProvider(applicationContext) }
+    private val googlePlayReviewPrompt by lazy { GooglePlayReviewPrompt(applicationContext) }
     private val supportFlowFlags = SupportFlowFlags()
     private lateinit var appUpdateManager: AppUpdateManager
 
@@ -193,7 +195,6 @@ class MainActivity : ComponentActivity() {
     private var setTechNameFromSocket: ((String) -> Unit)? = null
     private var setRecordingAudioFromActivity: ((Boolean) -> Unit)? = null
     private var setEndedSessionForFeedback: ((String?) -> Unit)? = null
-
     private var currentSessionId: String? = null
     private lateinit var socket: Socket
     private lateinit var voiceCallManager: VoiceCallManager
@@ -604,7 +605,7 @@ class MainActivity : ComponentActivity() {
         val techInfo = techName?.takeIf { it.isNotBlank() }?.let { SessionTechInfo(name = it) }
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
-                sessionRepository.bindClient(sessionId)
+                check(sessionRepository.ensureClientMembership(sessionId)) { "session_membership_not_ready" }
                 sessionRepository.startSession(sessionId, clientInfo, techInfo)
             }.onFailure { err ->
                 Log.e("SXS/Main", "Falha ao registrar inicio da sessao $sessionId", err)
@@ -1035,12 +1036,6 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             runtimePermissions.add(Manifest.permission.RECORD_AUDIO)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            runtimePermissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
         if (runtimePermissions.isNotEmpty()) {
             initialRuntimePermissionsLauncher.launch(runtimePermissions.toTypedArray())
         }
@@ -1888,11 +1883,16 @@ class MainActivity : ComponentActivity() {
         runOnUiThread { setTechNameFromSocket?.invoke("T\u00e9cnico") }
     }
 
-    private fun submitCustomerSatisfaction(sessionId: String, score: Int) {
+    private fun submitCustomerSatisfaction(
+        sessionId: String,
+        score: Int,
+        onSaved: () -> Unit = {}
+    ) {
         val normalizedSessionId = sessionId.trim()
         if (normalizedSessionId.isBlank()) return
         val normalizedScore = score.coerceIn(0, 5)
         lifecycleScope.launch(Dispatchers.IO) {
+            var saved = false
             try {
                 val token = authRepository.ensureAnonIdToken(forceRefresh = false)
                 if (token.isBlank()) return@launch
@@ -1907,10 +1907,15 @@ class MainActivity : ComponentActivity() {
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         Log.w("SXS/Main", "Falha ao enviar feedback do cliente (${response.code})")
+                    } else {
+                        saved = true
                     }
                 }
             } catch (error: Exception) {
                 Log.w("SXS/Main", "Falha ao enviar satisfação do cliente", error)
+            }
+            if (saved) {
+                runOnUiThread { onSaved() }
             }
         }
     }
@@ -2420,9 +2425,33 @@ class MainActivity : ComponentActivity() {
         }
         shareRequestFromCommand = fromCommand
         ensureRemoteAccessConsent {
-            setSystemMessageFromLauncher?.invoke("Ao compartilhar, selecione a tela inteira do dispositivo.")
-            val intent = createScreenCaptureIntentForSupport()
-            screenCaptureLauncher.launch(intent)
+            setSystemMessageFromLauncher?.invoke("Preparando compartilhamento...")
+            lifecycleScope.launch(Dispatchers.IO) {
+                val ready = ensureRealtimeSessionReady(sid, reason = "screen_share_start")
+                runOnUiThread {
+                    if (!ready || currentSessionId != sid) {
+                        shareRequestFromCommand = false
+                        setSystemMessageFromLauncher?.invoke(
+                            "Sessao ainda sincronizando. Tente compartilhar novamente em alguns segundos."
+                        )
+                        return@runOnUiThread
+                    }
+                    setSystemMessageFromLauncher?.invoke("Ao compartilhar, selecione a tela inteira do dispositivo.")
+                    val intent = createScreenCaptureIntentForSupport()
+                    screenCaptureLauncher.launch(intent)
+                }
+            }
+        }
+    }
+
+    private suspend fun ensureRealtimeSessionReady(sessionId: String, reason: String): Boolean {
+        val sid = sessionId.trim()
+        if (sid.isBlank()) return false
+        return runCatching {
+            sessionRepository.ensureClientMembership(sid)
+        }.getOrElse { error ->
+            Log.w("SXS/Main", "Sessao realtime indisponivel para $reason", error)
+            false
         }
     }
 
@@ -2457,16 +2486,30 @@ class MainActivity : ComponentActivity() {
                     setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
                     return@registerForActivityResult
                 }
-                val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_START
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
-                    putExtra(ScreenCaptureService.EXTRA_ROOM_CODE, sid)
+                val resultCode = result.resultCode
+                val resultData = result.data
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val ready = ensureRealtimeSessionReady(sid, reason = "screen_capture_result")
+                    runOnUiThread {
+                        if (!ready || currentSessionId != sid) {
+                            shareRequestFromCommand = false
+                            setSystemMessageFromLauncher?.invoke(
+                                "Sessao ainda sincronizando. Inicie o compartilhamento novamente."
+                            )
+                            return@runOnUiThread
+                        }
+                        val serviceIntent = Intent(this@MainActivity, ScreenCaptureService::class.java).apply {
+                            action = ScreenCaptureService.ACTION_START
+                            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resultCode)
+                            putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, resultData)
+                            putExtra(ScreenCaptureService.EXTRA_ROOM_CODE, sid)
+                        }
+                        ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
+                        val origin = if (shareRequestFromCommand) "tech" else "client"
+                        updateSharingState(active = true, origin = origin)
+                        shareRequestFromCommand = false
+                    }
                 }
-                ContextCompat.startForegroundService(this, serviceIntent)
-                val origin = if (shareRequestFromCommand) "tech" else "client"
-                updateSharingState(active = true, origin = origin)
-                shareRequestFromCommand = false
             } else {
                 setSystemMessageFromLauncher?.invoke("Permissao de captura negada.")
                 shareRequestFromCommand = false
@@ -2624,8 +2667,16 @@ class MainActivity : ComponentActivity() {
             .recoverCatching { startActivity(webIntent) }
             .onFailure { err ->
                 Log.w("SXS/Main", "Falha ao abrir pagina do app na Play Store", err)
-                Toast.makeText(this, "Abra a Play Store para atualizar o Suporte X.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Abra a Play Store para avaliar ou atualizar o Suporte X.", Toast.LENGTH_LONG).show()
             }
+    }
+
+    private fun requestGooglePlayReviewOrOpenStore() {
+        googlePlayReviewPrompt.requestReview(this) { launched ->
+            if (!launched) {
+                openPlayStoreListing()
+            }
+        }
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -3025,6 +3076,7 @@ class MainActivity : ComponentActivity() {
 
                         Screen.HELP -> HelpScreen(
                             onClose = { current = Screen.HOME },
+                            onOpenPlayStore = { requestGooglePlayReviewOrOpenStore() },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -3152,7 +3204,9 @@ class MainActivity : ComponentActivity() {
                                 val targetSessionId = endedSessionId
                                 endedSessionId = null
                                 if (!targetSessionId.isNullOrBlank()) {
-                                    submitCustomerSatisfaction(targetSessionId, score)
+                                    submitCustomerSatisfaction(targetSessionId, score) {
+                                        googlePlayReviewPrompt.onInternalRatingSubmitted(this@MainActivity)
+                                    }
                                 }
                                 clearAllSupportNotificationsAfterFeedback()
                                 Toast.makeText(
@@ -3281,6 +3335,7 @@ private fun HomeScreen(
 @Composable
 private fun HelpScreen(
     onClose: () -> Unit,
+    onOpenPlayStore: () -> Unit,
     textMuted: Color
 ) {
     Column(
@@ -3340,6 +3395,13 @@ private fun HelpScreen(
                 title = "8. Canais oficiais",
                 body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
             )
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onOpenPlayStore,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Avaliar Suporte X na Google Play")
+            }
         }
     }
 }

@@ -1,7 +1,9 @@
 package com.suportex.app.data
 
+import android.util.Log
 import com.google.android.gms.tasks.Task
 import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -21,6 +23,56 @@ class SessionRepository {
                 SetOptions.merge()
             ).await()
         return uid
+    }
+
+    suspend fun ensureClientMembership(
+        sessionId: String,
+        attempts: Int = SESSION_MEMBERSHIP_ATTEMPTS
+    ): Boolean {
+        val sid = sessionId.trim()
+        if (sid.isBlank()) return false
+
+        val uid = authRepository.ensureAnonAuth().trim()
+        if (uid.isBlank()) return false
+
+        var lastError: Throwable? = null
+        repeat(attempts.coerceAtLeast(1)) { attempt ->
+            val ready = runCatching {
+                val snapshot = db.collection("sessions").document(sid).get().await()
+                val boundUid = snapshot.getString("clientUid")?.trim().orEmpty()
+                when {
+                    boundUid == uid -> true
+                    boundUid.isBlank() -> {
+                        bindClient(sid)
+                        false
+                    }
+                    else -> {
+                        Log.w(TAG, "Sessao $sid vinculada a outro clientUid")
+                        return false
+                    }
+                }
+            }.getOrElse { error ->
+                lastError = error
+                runCatching { bindClient(sid) }
+                    .onFailure { bindError -> lastError = bindError }
+                false
+            }
+
+            if (ready) return true
+            delay(SESSION_MEMBERSHIP_RETRY_DELAY_MS * (attempt + 1))
+        }
+
+        val confirmed = runCatching {
+            val snapshot = db.collection("sessions").document(sid).get().await()
+            snapshot.getString("clientUid")?.trim() == uid
+        }.getOrElse { error ->
+            lastError = error
+            false
+        }
+        if (!confirmed && lastError != null) {
+            Log.w(TAG, "Falha ao confirmar vinculo da sessao $sid", lastError)
+        }
+        return confirmed
     }
 
     suspend fun startSession(
@@ -170,3 +222,7 @@ private suspend fun <T> Task<T>.await(): T =
             }
         }
     }
+
+private const val TAG = "SXS/SessionRepo"
+private const val SESSION_MEMBERSHIP_ATTEMPTS = 6
+private const val SESSION_MEMBERSHIP_RETRY_DELAY_MS = 220L

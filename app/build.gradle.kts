@@ -14,8 +14,8 @@ android {
         applicationId = "com.suportex.app"
         minSdk = 24
         targetSdk = 37
-        versionCode = 8
-        versionName = "1.1.4"
+        versionCode = 10
+        versionName = "1.1.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -82,4 +82,6 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.lottie.compose)
     implementation(libs.google.play.app.update)
+    implementation(libs.google.play.review)
+    implementation(libs.google.play.review.ktx)
 }

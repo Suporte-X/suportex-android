@@ -10,6 +10,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.suportex.app.data.AuthRepository
 import com.suportex.app.data.FirebaseDataSource
+import com.suportex.app.data.SessionRepository
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,12 +61,15 @@ class VoiceCallManager(
     private val onUpdate: (CallUiUpdate) -> Unit
 ) {
     private val authRepository = AuthRepository()
+    private val sessionRepository = SessionRepository()
     private val db = FirebaseDataSource.db
 
     private var sessionId: String? = null
+    private var sessionReady = false
     private var currentCallId: String? = null
     private var callListener: ListenerRegistration? = null
     private var remoteIceListener: ListenerRegistration? = null
+    private var bindJob: Job? = null
     private var timeoutJob: Job? = null
     private var disconnectGraceJob: Job? = null
 
@@ -88,8 +92,13 @@ class VoiceCallManager(
         if (this.sessionId == sessionId) return
         release()
         this.sessionId = sessionId
+        sessionReady = false
         if (sessionId.isNullOrBlank()) return
-        listenToCallDocument(sessionId)
+        bindJob = scope.launch(Dispatchers.IO) {
+            val ready = ensureSessionReady(sessionId)
+            if (!ready || this@VoiceCallManager.sessionId != sessionId) return@launch
+            listenToCallDocument(sessionId)
+        }
     }
 
     fun startOutgoingCall() {
@@ -106,6 +115,11 @@ class VoiceCallManager(
         scheduleTimeout()
 
         scope.launch(Dispatchers.IO) {
+            if (!ensureSessionReady(sid)) {
+                updateState(CallState.FAILED, direction, reason = "session_not_ready")
+                cleanupCall()
+                return@launch
+            }
             val uid = authRepository.ensureAnonAuth()
             val payload = mapOf(
                 "status" to "ringing",
@@ -128,6 +142,11 @@ class VoiceCallManager(
         updateState(CallState.CONNECTING, direction)
         scheduleTimeout(cancelOnly = true)
         scope.launch(Dispatchers.IO) {
+            if (!ensureSessionReady(sid)) {
+                updateState(CallState.FAILED, direction, reason = "session_not_ready")
+                cleanupCall()
+                return@launch
+            }
             authRepository.ensureAnonAuth()
             val payload = mapOf(
                 "status" to "accepted",
@@ -138,7 +157,6 @@ class VoiceCallManager(
                 .document("active")
                 .set(payload, SetOptions.merge())
         }
-        startAnswererFlowIfReady()
     }
 
     fun declineIncomingCall() {
@@ -147,6 +165,7 @@ class VoiceCallManager(
         updateState(CallState.DECLINED, direction, reason = "declined")
         scheduleTimeout(cancelOnly = true)
         scope.launch(Dispatchers.IO) {
+            if (!ensureSessionReady(sid)) return@launch
             authRepository.ensureAnonAuth()
             val payload = mapOf(
                 "status" to "declined",
@@ -166,6 +185,7 @@ class VoiceCallManager(
         updateState(CallState.ENDED, direction, reason = "ended")
         scheduleTimeout(cancelOnly = true)
         scope.launch(Dispatchers.IO) {
+            if (!ensureSessionReady(sid)) return@launch
             authRepository.ensureAnonAuth()
             val payload = mapOf(
                 "status" to "ended",
@@ -183,9 +203,26 @@ class VoiceCallManager(
     fun release() {
         scheduleTimeout(cancelOnly = true)
         cleanupCall()
+        bindJob?.cancel()
+        bindJob = null
         callListener?.remove()
         callListener = null
         sessionId = null
+        sessionReady = false
+    }
+
+    private suspend fun ensureSessionReady(sessionId: String): Boolean {
+        if (sessionReady && this.sessionId == sessionId) return true
+        val ready = runCatching {
+            sessionRepository.ensureClientMembership(sessionId)
+        }.getOrElse { error ->
+            Log.w(TAG, "CALL session membership not ready", error)
+            false
+        }
+        if (ready && this.sessionId == sessionId) {
+            sessionReady = true
+        }
+        return ready
     }
 
     private fun listenToCallDocument(sessionId: String) {
