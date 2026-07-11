@@ -1,7 +1,10 @@
 package com.suportex.app.ui.screens
 
+import android.graphics.Rect
 import android.util.Log
+import android.view.ViewTreeObserver
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -35,7 +38,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -98,7 +104,12 @@ fun SessionScreen(
         }
     }
     val focus = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val ctx = LocalContext.current
+    val density = LocalDensity.current
+    val keyboardVisibleByInsets = WindowInsets.ime.getBottom(density) > 0
+    val keyboardVisibleByLayout = rememberKeyboardVisibleByLayout()
+    val keyboardVisible = keyboardVisibleByInsets || keyboardVisibleByLayout
     val audioPlaybackController = rememberAudioPlaybackController()
 
     DisposableEffect(Unit) {
@@ -145,6 +156,18 @@ fun SessionScreen(
             CallState.TIMEOUT
         )
     val showConnectingState = !showIncomingCallPrompt && !callIsConnected && callState == CallState.CONNECTING
+    val keyboardMode = keyboardVisible
+
+    BackHandler(enabled = keyboardMode) {
+        focus.clearFocus(force = true)
+        keyboardController?.hide()
+    }
+
+    LaunchedEffect(keyboardVisible) {
+        if (!keyboardVisible) {
+            focus.clearFocus(force = true)
+        }
+    }
 
     // === Timer da ligação (só conta quando callIsConnected = true) ===
     var callSeconds by remember { mutableIntStateOf(0) }
@@ -302,22 +325,26 @@ fun SessionScreen(
         Modifier
             .fillMaxSize()
             .padding(16.dp)
-            .pointerInput(Unit) { detectTapGestures { focus.clearFocus() } }
+            .pointerInput(Unit) {
+                detectTapGestures {
+                    focus.clearFocus(force = true)
+                    keyboardController?.hide()
+                }
+            }
     ) {
 
-        // === LOGO (TOPO) ===
-        Image(
-            painter = painterResource(id = R.drawable.ic_suportex_logo_horizontal),
-            contentDescription = "Suporte X",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-                .padding(bottom = 12.dp)
-                .align(Alignment.CenterHorizontally),
-            contentScale = ContentScale.Fit
-        )
-        // === LOGO (TOPO) — FIM ===
-
+            // === LOGO (TOPO) ===
+            Image(
+                painter = painterResource(id = R.drawable.ic_suportex_logo_horizontal),
+                contentDescription = "Suporte X",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(bottom = 12.dp)
+                    .align(Alignment.CenterHorizontally),
+                contentScale = ContentScale.Fit
+            )
+            // === LOGO (TOPO) — FIM ===
         // CAIXA DE STATUS
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -374,224 +401,224 @@ fun SessionScreen(
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(16.dp))
 
-        // INICIAR / PARAR COMPARTILHAMENTO — mais “magro”
-        Button(
-            onClick = { if (isSharing) onStopShare() else onStartShare() },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp),                // 64 -> 54
-            shape = RoundedCornerShape(27.dp), // 32 -> 27 (pílula mais elegante)
-            colors =
-                if (isSharing)
-                    ButtonDefaults.buttonColors(
-                        containerColor = brandYellowActive,
-                        contentColor = Color.White
-                    )
-                else
-                    ButtonDefaults.buttonColors(
-                        containerColor = brandYellow,
-                        contentColor = Color.Black
-                    )
-        ) {
-            Text(if (isSharing) "PARAR COMPARTILHAMENTO" else "INICIAR COMPARTILHAMENTO", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-        }
-
-        // praticamente colado no botão de compartilhar
-        Spacer(Modifier.height(2.dp))
-
-        // SWITCH DE ACESSO REMOTO — compacto e alinhado como extensão do botão
-        @OptIn(ExperimentalMaterial3Api::class)
-        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
-            Row(
+            // INICIAR / PARAR COMPARTILHAMENTO — mais “magro”
+            Button(
+                onClick = { if (isSharing) onStopShare() else onStartShare() },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset(y = (-2).dp)        //puxa 2dp pra cima
-                    .padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
+                    .height(54.dp),                // 64 -> 54
+                shape = RoundedCornerShape(27.dp), // 32 -> 27 (pílula mais elegante)
+                colors =
+                    if (isSharing)
+                        ButtonDefaults.buttonColors(
+                            containerColor = brandYellowActive,
+                            contentColor = Color.White
+                        )
+                    else
+                        ButtonDefaults.buttonColors(
+                            containerColor = brandYellow,
+                            contentColor = Color.Black
+                        )
             ) {
-                Text(
-                    "Permitir Acesso Remoto",
-                    fontSize = 14.sp,
-                    color = Color(0xFF6B6B6B)
-                )
-                Spacer(Modifier.width(6.dp))
-                Switch(
-                    modifier = Modifier.scale(0.9f), // deixa o switch um pouquinho menor
-                    checked = remoteEnabled,
-                    onCheckedChange = { enable ->
-                        onToggleRemote(enable)
-                        if (enable && !isSharing) {
-                            // dica só quando a pessoa liga o remoto antes do compartilhamento
-                            toastOnce("Inicie o compartilhamento para começar")
-                        }
-                        // Quando já está compartilhando, os toasts de “ativado/desativado”
-                        // continuam centralizados no LaunchedEffect lá em cima.
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedTrackColor = infoBlue,
-                        checkedThumbColor = Color.White,
-                        uncheckedTrackColor = Color(0xFFCBCBCB),
-                        uncheckedThumbColor = Color.White
-                    )
-                )
+                Text(if (isSharing) "PARAR COMPARTILHAMENTO" else "INICIAR COMPARTILHAMENTO", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
             }
-        }
+
+            // praticamente colado no botão de compartilhar
+            Spacer(Modifier.height(2.dp))
+
+            // SWITCH DE ACESSO REMOTO — compacto e alinhado como extensão do botão
+            @OptIn(ExperimentalMaterial3Api::class)
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .offset(y = (-2).dp)        //puxa 2dp pra cima
+                        .padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Permitir Acesso Remoto",
+                        fontSize = 14.sp,
+                        color = Color(0xFF6B6B6B)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Switch(
+                        modifier = Modifier.scale(0.9f), // deixa o switch um pouquinho menor
+                        checked = remoteEnabled,
+                        onCheckedChange = { enable ->
+                            onToggleRemote(enable)
+                            if (enable && !isSharing) {
+                                // dica só quando a pessoa liga o remoto antes do compartilhamento
+                                toastOnce("Inicie o compartilhamento para começar")
+                            }
+                            // Quando já está compartilhando, os toasts de “ativado/desativado”
+                            // continuam centralizados no LaunchedEffect lá em cima.
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = infoBlue,
+                            checkedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFFCBCBCB),
+                            uncheckedThumbColor = Color.White
+                        )
+                    )
+                }
+            }
 
 // pode manter o espaçamento seguinte como estava, ou reduzir um pouco se quiser
-        Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(10.dp))
 
-        if (showIncomingCallPrompt) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                color = Color(0xFFFFF7E0),
-                tonalElevation = 0.dp,
-                shadowElevation = 1.dp,
-                border = BorderStroke(1.dp, borderSoft)
-            ) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Chamada recebida", fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = onAcceptCall,
-                            modifier = Modifier.weight(1f).height(42.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = successGreen,
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(21.dp)
-                        ) {
-                            Text("ACEITAR")
-                        }
-                        Button(
-                            onClick = onDeclineCall,
-                            modifier = Modifier.weight(1f).height(42.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = dangerRed,
-                                contentColor = Color.White
-                            ),
-                            shape = RoundedCornerShape(21.dp)
-                        ) {
-                            Text("RECUSAR")
+            if (showIncomingCallPrompt) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color(0xFFFFF7E0),
+                    tonalElevation = 0.dp,
+                    shadowElevation = 1.dp,
+                    border = BorderStroke(1.dp, borderSoft)
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("Chamada recebida", fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = onAcceptCall,
+                                modifier = Modifier.weight(1f).height(42.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = successGreen,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(21.dp)
+                            ) {
+                                Text("ACEITAR")
+                            }
+                            Button(
+                                onClick = onDeclineCall,
+                                modifier = Modifier.weight(1f).height(42.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = dangerRed,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(21.dp)
+                            ) {
+                                Text("RECUSAR")
+                            }
                         }
                     }
                 }
+
+                Spacer(Modifier.height(10.dp))
             }
 
-            Spacer(Modifier.height(10.dp))
-        }
-
-        // BOTÃO DE CHAMADA — três estados: parado / chamando / conectado (com chip de tempo)
-        if (!showIncomingCallPrompt) when {
-            // 1) NÃO EM CHAMADA
-            showIdleCallAction -> {
-                OutlinedButton(
-                    onClick = onStartCall,
-                    enabled = sessionId != null,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(callPillHeight),
-                    shape = RoundedCornerShape(callPillRadius),
-                    border = BorderStroke(1.dp, borderSoft),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = Color.White,
-                        contentColor = infoBlue
-                    )
-                ) {
-                    Icon(Icons.Default.Phone, contentDescription = null, tint = infoBlue)
-                    Spacer(Modifier.width(8.dp))
-                    Text("REALIZAR CHAMADA", fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            // 2) EM CHAMADA, AINDA CONECTANDO (técnico não atendeu)
-            showConnectingState -> {
-                Button(
-                    onClick = onEndCall, // permite cancelar enquanto chama
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(callPillHeight),
-                    shape = RoundedCornerShape(callPillRadius),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFEFF3FF),
-                        contentColor = infoBlue
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
-                ) {
-                    Icon(Icons.Default.Phone, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("CONECTANDO...", fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            // 3) EM CHAMADA E CONECTADO — botão + chip de tempo
-            callIsConnected -> {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Botão "Finalizar"
-                    Button(
-                        onClick = onEndCall,
+            // BOTÃO DE CHAMADA — três estados: parado / chamando / conectado (com chip de tempo)
+            if (!showIncomingCallPrompt) when {
+                // 1) NÃO EM CHAMADA
+                showIdleCallAction -> {
+                    OutlinedButton(
+                        onClick = onStartCall,
+                        enabled = sessionId != null,
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxWidth()
+                            .height(callPillHeight),
+                        shape = RoundedCornerShape(callPillRadius),
+                        border = BorderStroke(1.dp, borderSoft),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color.White,
+                            contentColor = infoBlue
+                        )
+                    ) {
+                        Icon(Icons.Default.Phone, contentDescription = null, tint = infoBlue)
+                        Spacer(Modifier.width(8.dp))
+                        Text("REALIZAR CHAMADA", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                // 2) EM CHAMADA, AINDA CONECTANDO (técnico não atendeu)
+                showConnectingState -> {
+                    Button(
+                        onClick = onEndCall, // permite cancelar enquanto chama
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .height(callPillHeight),
                         shape = RoundedCornerShape(callPillRadius),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = endCallContainer,
-                            contentColor = endCallContent
+                            containerColor = Color(0xFFEFF3FF),
+                            contentColor = infoBlue
                         ),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
                     ) {
-                        Icon(Icons.Default.Phone, contentDescription = null, tint = endCallContent)
+                        Icon(Icons.Default.Phone, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("FINALIZAR CHAMADA", fontWeight = FontWeight.SemiBold)
+                        Text("CONECTANDO...", fontWeight = FontWeight.SemiBold)
                     }
+                }
 
-                    Spacer(Modifier.width(6.dp))
-
-                    // Chip do tempo
-                    Surface(
-                        modifier = Modifier.height(callPillHeight),
-                        shape = RoundedCornerShape(callPillRadius),
-                        color = timeChipBg,
-                        tonalElevation = 0.dp,
-                        shadowElevation = 0.dp,
-                        border = BorderStroke(1.dp, borderSoft)
+                // 3) EM CHAMADA E CONECTADO — botão + chip de tempo
+                callIsConnected -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        // Botão "Finalizar"
+                        Button(
+                            onClick = onEndCall,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(callPillHeight),
+                            shape = RoundedCornerShape(callPillRadius),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = endCallContainer,
+                                contentColor = endCallContent
+                            ),
+                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
                         ) {
-                            Text(callTimer, color = timeChipText, fontWeight = FontWeight.SemiBold)
+                            Icon(Icons.Default.Phone, contentDescription = null, tint = endCallContent)
+                            Spacer(Modifier.width(8.dp))
+                            Text("FINALIZAR CHAMADA", fontWeight = FontWeight.SemiBold)
+                        }
+
+                        Spacer(Modifier.width(6.dp))
+
+                        // Chip do tempo
+                        Surface(
+                            modifier = Modifier.height(callPillHeight),
+                            shape = RoundedCornerShape(callPillRadius),
+                            color = timeChipBg,
+                            tonalElevation = 0.dp,
+                            shadowElevation = 0.dp,
+                            border = BorderStroke(1.dp, borderSoft)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(callTimer, color = timeChipText, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                     }
                 }
-            }
 
-            else -> {
-                Button(
-                    onClick = onEndCall,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(callPillHeight),
-                    shape = RoundedCornerShape(callPillRadius),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFEFF3FF),
-                        contentColor = infoBlue
-                    ),
-                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
-                ) {
-                    Icon(Icons.Default.Phone, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("CHAMANDO...", fontWeight = FontWeight.SemiBold)
+                else -> {
+                    Button(
+                        onClick = onEndCall,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(callPillHeight),
+                        shape = RoundedCornerShape(callPillRadius),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFEFF3FF),
+                            contentColor = infoBlue
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+                    ) {
+                        Icon(Icons.Default.Phone, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("CHAMANDO...", fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
-        }
 
         Spacer(Modifier.height(16.dp))
 
@@ -701,13 +728,14 @@ fun SessionScreen(
                 }
 
                 // --- Pílulas do input e do Enviar ---
-                val inputPillHeight = 48.dp
-                val inputPillRadius = 24.dp
+                val inputPillHeight = if (keyboardMode) 56.dp else 48.dp
+                val inputPillRadius = if (keyboardMode) 28.dp else 24.dp
+                val inputVerticalPadding = if (keyboardMode) 8.dp else 10.dp
 
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 12.dp, vertical = inputVerticalPadding),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -716,14 +744,27 @@ fun SessionScreen(
                         onValueChange = { input = it },
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = inputPillHeight, max = 140.dp)   // cresce, mas com limite
+                            .heightIn(
+                                min = inputPillHeight,
+                                max = if (keyboardMode) inputPillHeight else 140.dp
+                            )
                             .clip(RoundedCornerShape(inputPillRadius)),       // clip igual ao shape
-                        placeholder = { Text("Mensagem…") },
+                        textStyle = LocalTextStyle.current.copy(
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp
+                        ),
+                        placeholder = {
+                            Text(
+                                "Mensagem...",
+                                fontSize = 14.sp,
+                                lineHeight = 18.sp
+                            )
+                        },
 
                         // MULTILINHA
-                        singleLine = false,
+                        singleLine = keyboardMode,
                         minLines = 1,
-                        maxLines = 4,
+                        maxLines = if (keyboardMode) 1 else 4,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default), // mostra Enter
 
                         // pílula perfeita
@@ -781,7 +822,6 @@ fun SessionScreen(
                                 Log.d("ChatDedup", "origin=android-send id=$messageId sessionId=$sessionId")
                                 Conn.socket?.emit("session:chat:send", payload)
                                 input = ""
-                                focus.clearFocus()
                             } else if (sessionId == null) {
                                 toastOnce("Sessão ainda não aceita pelo técnico.")
                             }
@@ -808,16 +848,43 @@ fun SessionScreen(
             )
         }
 
-        Spacer(Modifier.height(14.dp))
+        if (!keyboardMode) {
+            Spacer(Modifier.height(14.dp))
 
-        // ENCERRAR SUPORTE
-        Button(
-            onClick = onEndSupport,
-            modifier = Modifier.fillMaxWidth().height(64.dp),
-            shape = RoundedCornerShape(32.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = dangerRed, contentColor = Color.White)
-        ) { Text("ENCERRAR SUPORTE") }
+            // ENCERRAR SUPORTE
+            Button(
+                onClick = onEndSupport,
+                modifier = Modifier.fillMaxWidth().height(64.dp),
+                shape = RoundedCornerShape(32.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = dangerRed, contentColor = Color.White)
+            ) { Text("ENCERRAR SUPORTE") }
+        }
     }
+}
+
+@Composable
+private fun rememberKeyboardVisibleByLayout(): Boolean {
+    val view = LocalView.current
+    var keyboardVisible by remember { mutableStateOf(false) }
+
+    DisposableEffect(view) {
+        val visibleFrame = Rect()
+        val listener = ViewTreeObserver.OnGlobalLayoutListener {
+            view.getWindowVisibleDisplayFrame(visibleFrame)
+            val rootHeight = view.rootView.height
+            val hiddenHeight = rootHeight - visibleFrame.bottom
+            keyboardVisible = rootHeight > 0 && hiddenHeight > rootHeight * 0.15f
+        }
+
+        view.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        onDispose {
+            if (view.viewTreeObserver.isAlive) {
+                view.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+            }
+        }
+    }
+
+    return keyboardVisible
 }
 
 @Composable

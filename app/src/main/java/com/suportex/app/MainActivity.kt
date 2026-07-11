@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.Manifest
 import android.app.AlertDialog
+import android.app.Dialog
+import android.graphics.drawable.ColorDrawable
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.app.ActivityManager
@@ -27,6 +29,8 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
+import android.view.ViewGroup
+import android.view.Window
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -36,6 +40,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -44,6 +49,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -52,10 +60,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -65,8 +76,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.google.firebase.messaging.FirebaseMessaging
 import com.suportex.app.data.ClientSupportRepository
 import com.suportex.app.data.ClientSupportRepository.SupportQueueWaitStats
+import com.suportex.app.data.ClientNotificationRecord
+import com.suportex.app.data.ClientNotificationRepository
+import com.suportex.app.data.DeviceIdentity
 import com.suportex.app.data.FirebasePhoneIdentityProvider
 import com.suportex.app.data.PhonePnvVerificationResult
 import com.suportex.app.data.SupportBillingConfig
@@ -90,6 +105,9 @@ import com.suportex.app.remote.AccessibilityUtils
 import com.suportex.app.remote.RemoteCommandBus
 import com.suportex.app.remote.RemoteControlService
 import com.suportex.app.ui.screens.CardPlaceholderScreen
+import com.suportex.app.ui.screens.ClientNotificationUi
+import com.suportex.app.ui.screens.ClientNotificationType
+import com.suportex.app.ui.screens.NotificationCenterUiState
 import com.suportex.app.ui.screens.PixPlaceholderScreen
 import com.suportex.app.ui.screens.PurchaseCreditsScreen
 import com.suportex.app.ui.screens.SessionFeedbackScreen
@@ -114,8 +132,6 @@ import android.media.MediaRecorder
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
-import java.security.MessageDigest
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -156,6 +172,7 @@ private const val EXTRA_WAITING_ANCHOR_ID = "extra_waiting_anchor_id"
 private const val PREFS_WAITING_SUPPORT = "waiting_support_runtime"
 private const val KEY_PENDING_SUPPORT_SESSION_ID = "pending_support_session_id"
 private const val WAITING_SESSION_RECOVERY_INTERVAL_MS = 4_000L
+private const val ACTION_OPEN_CLIENT_NOTIFICATION = "com.suportex.app.action.OPEN_CLIENT_NOTIFICATION"
 
 private data class SupportFlowFlags(
     val showCreditPanelOnlyForRegisteredClients: Boolean = true,
@@ -174,6 +191,7 @@ class MainActivity : ComponentActivity() {
     private val sessionRepository = SessionRepository()
     private val authRepository = AuthRepository()
     private val clientSupportRepository = ClientSupportRepository()
+    private val clientNotificationRepository = ClientNotificationRepository()
     private val phoneIdentityProvider by lazy { FirebasePhoneIdentityProvider(applicationContext) }
     private val googlePlayReviewPrompt by lazy { GooglePlayReviewPrompt(applicationContext) }
     private val supportFlowFlags = SupportFlowFlags()
@@ -182,6 +200,7 @@ class MainActivity : ComponentActivity() {
     // Bridges Activity -> Compose (ja existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
     private var setSystemMessageFromLauncher: ((String?) -> Unit)? = null
+    private var requestOpenClientNotificationCenterFromLauncher: (() -> Unit)? = null
 
     // Bridges Socket -> Compose (novos)
     private var setRequestIdFromSocket: ((String?) -> Unit)? = null
@@ -222,6 +241,7 @@ class MainActivity : ComponentActivity() {
     private var pendingLaunchAcceptedSessionId: String? = null
     private var pendingLaunchAcceptedTechName: String? = null
     private var pendingLaunchAcceptedLocalSupportSessionId: String? = null
+    private var pendingOpenClientNotificationCenter = false
     private var currentCallUiState: CallState = CallState.IDLE
     private var currentCallDirection: CallDirection? = null
     private var incomingCallRingtone: Ringtone? = null
@@ -229,29 +249,17 @@ class MainActivity : ComponentActivity() {
     private var appUpdateCheckInProgress = false
     private var appUpdatePromptVisible = false
     private var appUpdatePromptShownThisLaunch = false
+    private var appUpdateDialog: Dialog? = null
 
     // -------- Helpers --------
     @Suppress("unused")
     private fun deviceId(): String {
-        val p = getSharedPreferences("app", MODE_PRIVATE)
-        val cur = p.getString("device_id", null)
-        if (cur != null) return cur
-        val gen = UUID.randomUUID().toString()
-        p.edit { putString("device_id", gen) }
-        return gen
+        return DeviceIdentity.deviceId(this)
     }
 
     @SuppressLint("HardwareIds")
     private fun deviceAnchor(): String {
-        val androidId = runCatching {
-            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
-        }.getOrNull()
-            ?.trim()
-            ?.takeIf { it.isNotBlank() && it != "9774d56d682e549c" }
-        val raw = androidId ?: deviceId()
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(raw.toByteArray())
-        return digest.joinToString("") { "%02x".format(it) }
+        return DeviceIdentity.deviceAnchor(this)
     }
     @Suppress("unused")
     private fun copyToClipboard(label: String, text: String) {
@@ -1036,6 +1044,12 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             runtimePermissions.add(Manifest.permission.RECORD_AUDIO)
         }
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            runtimePermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
         if (runtimePermissions.isNotEmpty()) {
             initialRuntimePermissionsLauncher.launch(runtimePermissions.toTypedArray())
         }
@@ -1046,6 +1060,7 @@ class MainActivity : ComponentActivity() {
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)?.trim().orEmpty().ifBlank { null }
         when (action) {
             ACTION_OPEN_SESSION_CHAT -> pendingLaunchSessionFromNotification = sessionId
+            ACTION_OPEN_CLIENT_NOTIFICATION -> pendingOpenClientNotificationCenter = true
             ACTION_OPEN_SESSION_FEEDBACK -> pendingLaunchFeedbackSessionId = sessionId
             ACTION_WAITING_SUPPORT_ACCEPTED -> {
                 pendingLaunchAcceptedSessionId = sessionId
@@ -1059,6 +1074,7 @@ class MainActivity : ComponentActivity() {
         }
         if (
             action == ACTION_OPEN_SESSION_CHAT ||
+            action == ACTION_OPEN_CLIENT_NOTIFICATION ||
             action == ACTION_OPEN_SESSION_FEEDBACK ||
             action == ACTION_WAITING_SUPPORT_ACCEPTED
         ) {
@@ -1071,6 +1087,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyPendingLaunchIntentNavigation() {
+        if (pendingOpenClientNotificationCenter) {
+            pendingOpenClientNotificationCenter = false
+            setScreenFromSocket?.invoke(Screen.HOME)
+            requestOpenClientNotificationCenterFromLauncher?.invoke()
+            return
+        }
+
         val feedbackSessionId = pendingLaunchFeedbackSessionId
         if (!feedbackSessionId.isNullOrBlank()) {
             pendingLaunchFeedbackSessionId = null
@@ -2621,21 +2644,63 @@ class MainActivity : ComponentActivity() {
     private fun showPlayStoreUpdatePrompt(appUpdateInfo: AppUpdateInfo, updateType: Int) {
         if (isFinishing || isDestroyed || appUpdatePromptVisible) return
         appUpdatePromptVisible = true
-        AlertDialog.Builder(this)
-            .setTitle("Existe uma nova versao")
-            .setMessage("Atualize para continuar usando o Suporte X com as correcoes mais recentes.")
-            .setPositiveButton("Atualizar agora") { dialog, _ ->
-                dialog.dismiss()
-                startPlayStoreUpdate(appUpdateInfo, updateType)
+        val mandatoryUpdate = updateType == AppUpdateType.IMMEDIATE
+        val dialog = Dialog(this).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setCancelable(!mandatoryUpdate)
+            setCanceledOnTouchOutside(!mandatoryUpdate)
+        }
+
+        val dialogContent = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                MaterialTheme(
+                    colorScheme = lightColorScheme(
+                        primary = Color(0xFFFFCB19),
+                        onPrimary = Color(0xFF111111),
+                        surface = Color.White,
+                        background = Color(0xFFF4F6F8),
+                        outline = Color(0xFFE1E3E7)
+                    ),
+                    typography = Typography()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        PlayStoreUpdatePromptCard(
+                            mandatoryUpdate = mandatoryUpdate,
+                            onLater = { dialog.dismiss() },
+                            onUpdate = {
+                                dialog.dismiss()
+                                startPlayStoreUpdate(appUpdateInfo, updateType)
+                            }
+                        )
+                    }
+                }
             }
-            .setNegativeButton("Depois") { dialog, _ ->
-                appUpdatePromptVisible = false
-                dialog.dismiss()
-            }
-            .setOnCancelListener {
-                appUpdatePromptVisible = false
-            }
-            .show()
+        }
+
+        dialog.setContentView(
+            dialogContent,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        dialog.setOnDismissListener {
+            if (appUpdateDialog === dialog) appUpdateDialog = null
+            appUpdatePromptVisible = false
+        }
+        appUpdateDialog = dialog
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setDimAmount(0.62f)
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
     }
 
     private fun startPlayStoreUpdate(appUpdateInfo: AppUpdateInfo, updateType: Int) {
@@ -2675,6 +2740,104 @@ class MainActivity : ComponentActivity() {
         googlePlayReviewPrompt.requestReview(this) { launched ->
             if (!launched) {
                 openPlayStoreListing()
+            }
+        }
+    }
+
+    private fun shareAppListing() {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(
+                Intent.EXTRA_TEXT,
+                "Baixe o Suporte X: https://play.google.com/store/apps/details?id=$packageName"
+            )
+        }
+        startActivity(Intent.createChooser(shareIntent, "Compartilhar Suporte X"))
+    }
+
+    private fun openAppPermissionSettings() {
+        val intent = Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            "package:$packageName".toUri()
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    private fun registerNotificationTokenForClient(clientId: String?) {
+        FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { token ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching {
+                        clientNotificationRepository.registerDevice(
+                            context = applicationContext,
+                            fcmToken = token,
+                            clientId = clientId,
+                            deviceAnchor = deviceAnchor()
+                        )
+                    }.onFailure { err ->
+                        Log.w("SXS/Notifications", "Falha ao registrar token FCM", err)
+                    }
+                }
+            }
+            .addOnFailureListener { err ->
+                Log.w("SXS/Notifications", "Falha ao obter token FCM", err)
+            }
+    }
+
+    private fun recordsToNotificationUiState(records: List<ClientNotificationRecord>): NotificationCenterUiState {
+        val visible = records.filter { !it.dismissed && it.status != "dismissed" }
+        return NotificationCenterUiState(
+            hasNotifications = visible.isNotEmpty(),
+            unreadCount = visible.count { !it.read }.coerceAtLeast(0),
+            notifications = visible.map { record ->
+                ClientNotificationUi(
+                    id = record.id,
+                    title = record.title,
+                    description = record.body,
+                    badgeLabel = notificationBadgeLabel(record),
+                    actionLabel = record.actionLabel,
+                    type = notificationTypeFor(record),
+                    isRead = record.read,
+                    actionType = record.actionType,
+                    canDismiss = record.priority != "critical"
+                )
+            }
+        )
+    }
+
+    private fun notificationBadgeLabel(record: ClientNotificationRecord): String? {
+        if (!record.read) return "Novo"
+        return when (record.type) {
+            "CREDIT_ADDED",
+            "CREDIT_AVAILABLE",
+            "FIRST_FREE_AVAILABLE" -> "Crédito"
+            "LOW_CREDITS",
+            "NO_CREDITS" -> "Aviso"
+            "APP_UPDATE",
+            "APP_UPDATE_REQUIRED" -> "Atualização"
+            "SECURITY_NOTICE" -> "Segurança"
+            else -> null
+        }
+    }
+
+    private fun notificationTypeFor(record: ClientNotificationRecord): ClientNotificationType {
+        return when (record.type) {
+            "REVIEW_APP" -> ClientNotificationType.REVIEW
+            "SHARE_APP" -> ClientNotificationType.SHARE
+            "CREDIT_ADDED",
+            "CREDIT_AVAILABLE",
+            "FIRST_FREE_AVAILABLE" -> ClientNotificationType.CREDIT_REWARD
+            "LOW_CREDITS",
+            "NO_CREDITS" -> ClientNotificationType.LOW_CREDITS
+            "SECURITY_NOTICE",
+            "VERIFY_PHONE",
+            "COMPLETE_PROFILE" -> ClientNotificationType.SECURITY_NOTICE
+            else -> if (record.priority == "critical" || record.priority == "high") {
+                ClientNotificationType.WARNING
+            } else {
+                ClientNotificationType.INFO
             }
         }
     }
@@ -2794,6 +2957,8 @@ class MainActivity : ComponentActivity() {
                 val currentScreen by rememberUpdatedState(current)
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
+                var notificationCenterUiState by remember { mutableStateOf(NotificationCenterUiState.Empty) }
+                var notificationCenterOpenSignal by remember { mutableIntStateOf(0) }
 
                 fun finishStartupLoadingIfReady() {
                     if (showStartupLoading &&
@@ -2913,6 +3078,62 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                fun markNotificationAsRead(notification: ClientNotificationUi) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        runCatching { clientNotificationRepository.markAsRead(notification.id) }
+                            .onFailure { err -> Log.w("SXS/Notifications", "Falha ao marcar notificação como lida", err) }
+                    }
+                }
+
+                fun dismissClientNotification(notification: ClientNotificationUi) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        runCatching { clientNotificationRepository.dismiss(notification.id) }
+                            .onFailure { err -> Log.w("SXS/Notifications", "Falha ao dispensar notificação", err) }
+                    }
+                }
+
+                fun handleClientNotificationAction(notification: ClientNotificationUi) {
+                    val actionType = notification.actionType.trim().uppercase()
+                    if (actionType != "DISMISS") {
+                        markNotificationAsRead(notification)
+                    }
+                    when (actionType) {
+                        "REQUEST_SUPPORT" -> {
+                            val cachedDecision = preloadedSupportDecision
+                            if (cachedDecision != null) {
+                                handleSupportAccessDecision(cachedDecision)
+                            } else {
+                                evaluateSupportEntry { decision ->
+                                    preloadedSupportDecision = decision
+                                    handleSupportAccessDecision(decision)
+                                }
+                            }
+                        }
+                        "OPEN_CREDITS" -> {
+                            if (selectedPackage == null) {
+                                selectedPackage = homeSnapshot.packages.firstOrNull()
+                            }
+                            current = Screen.PURCHASE_CREDITS
+                        }
+                        "OPEN_PLAY_STORE" -> {
+                            if (notification.type == ClientNotificationType.REVIEW) {
+                                requestGooglePlayReviewOrOpenStore()
+                            } else {
+                                openPlayStoreListing()
+                            }
+                        }
+                        "OPEN_SHARE_SHEET" -> shareAppListing()
+                        "OPEN_SECURITY_SETTINGS" -> openAccessibilitySettings()
+                        "OPEN_PERMISSIONS" -> openAppPermissionSettings()
+                        "DISMISS" -> dismissClientNotification(notification)
+                        "MARK_AS_READ",
+                        "OPEN_NOTIFICATIONS",
+                        "NONE",
+                        "" -> Unit
+                        else -> Unit
+                    }
+                }
+
                 BackHandler {
                     when (current) {
                         Screen.HELP -> current = Screen.HOME
@@ -2952,6 +3173,9 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     setIsSharingFromLauncher = { isSharing = it }
                     setSystemMessageFromLauncher = { msg -> systemMessage = msg }
+                    requestOpenClientNotificationCenterFromLauncher = {
+                        notificationCenterOpenSignal += 1
+                    }
 
                     // Bridges Socket -> Compose
                     setRequestIdFromSocket = { req -> requestId = req }
@@ -2971,6 +3195,24 @@ class MainActivity : ComponentActivity() {
                     setEndedSessionForFeedback = { endedSessionId = it }
                     applyPendingLaunchIntentNavigation()
                     startBootstrap(showAnimation = true)
+                }
+
+                LaunchedEffect(homeSnapshot.clientUid, homeSnapshot.client?.id) {
+                    registerNotificationTokenForClient(homeSnapshot.client?.id)
+                }
+
+                DisposableEffect(homeSnapshot.clientUid, homeSnapshot.client?.id) {
+                    val registration = clientNotificationRepository.listenClientNotifications(
+                        clientUid = homeSnapshot.clientUid,
+                        clientId = homeSnapshot.client?.id,
+                        onChanged = { records ->
+                            notificationCenterUiState = recordsToNotificationUiState(records)
+                        },
+                        onError = { err ->
+                            Log.w("SXS/Notifications", "Listener de notificações falhou", err)
+                        }
+                    )
+                    onDispose { registration.remove() }
                 }
 
                 LaunchedEffect(current) {
@@ -3071,7 +3313,11 @@ class MainActivity : ComponentActivity() {
                             onOpenPrivacy = { current = Screen.PRIVACY },
                             onOpenTerms = { current = Screen.TERMS },
                             textMuted = Color(0xFF8A8A8E),
-                            averageWaitLabel = homeAverageWaitLabel
+                            averageWaitLabel = homeAverageWaitLabel,
+                            notificationState = notificationCenterUiState,
+                            openNotificationCenterSignal = notificationCenterOpenSignal,
+                            onNotificationAction = { handleClientNotificationAction(it) },
+                            onNotificationDismiss = { dismissClientNotification(it) }
                         )
 
                         Screen.HELP -> HelpScreen(
@@ -3281,6 +3527,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         stopIncomingCallAlert()
+        appUpdateDialog?.dismiss()
+        appUpdateDialog = null
         super.onDestroy()
         stopWaitingSessionRecovery()
         runCatching {
@@ -3395,13 +3643,28 @@ private fun HelpScreen(
                 title = "8. Canais oficiais",
                 body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
             )
-            Spacer(Modifier.height(12.dp))
-            OutlinedButton(
-                onClick = onOpenPlayStore,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Avaliar Suporte X na Google Play")
-            }
+            Spacer(Modifier.height(18.dp))
+        }
+
+        Spacer(Modifier.height(14.dp))
+        OutlinedButton(
+            onClick = onOpenPlayStore,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, Color(0xFFFFCB19)),
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = Color(0xFF2F3033)
+            )
+        ) {
+            Text(
+                text = "Avaliar Suporte X na Google Play",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
         }
     }
 }
@@ -3555,6 +3818,171 @@ private fun TermsOfUseScreen(
                 body = "Empresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895W\nResidencial Paraíso\nNova Mutum - MT\nCEP: 78.454-528\n\nE-mail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
+    }
+}
+
+@Composable
+private fun PlayStoreUpdatePromptCard(
+    mandatoryUpdate: Boolean,
+    onLater: () -> Unit,
+    onUpdate: () -> Unit
+) {
+    val brandPrimary = Color(0xFFFFCB19)
+    val onPrimary = Color(0xFF111111)
+    val textSecondary = Color(0xFF3F3F46)
+    val outline = Color(0xFFD1D5DB)
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 380.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = Color.White,
+        tonalElevation = 0.dp,
+        shadowElevation = 18.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 28.dp, vertical = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Atualização disponível",
+                color = onPrimary,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 24.sp,
+                lineHeight = 29.sp,
+                textAlign = TextAlign.Center
+            )
+            Surface(
+                modifier = Modifier
+                    .padding(top = 18.dp)
+                    .width(56.dp)
+                    .height(3.dp),
+                shape = RoundedCornerShape(100.dp),
+                color = brandPrimary
+            ) {}
+            Text(
+                text = "Uma nova versão do Suporte X está pronta. Atualize agora para receber melhorias, correções e manter seu atendimento funcionando com mais segurança.",
+                modifier = Modifier.padding(top = 28.dp),
+                color = textSecondary,
+                fontSize = 16.sp,
+                lineHeight = 25.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(30.dp))
+            if (mandatoryUpdate) {
+                UpdatePromptPrimaryButton(
+                    onClick = onUpdate,
+                    modifier = Modifier.fillMaxWidth(),
+                    brandPrimary = brandPrimary,
+                    onPrimary = onPrimary
+                )
+            } else {
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth < 300.dp) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            UpdatePromptSecondaryButton(
+                                onClick = onLater,
+                                modifier = Modifier.fillMaxWidth(),
+                                onPrimary = onPrimary,
+                                outline = outline
+                            )
+                            UpdatePromptPrimaryButton(
+                                onClick = onUpdate,
+                                modifier = Modifier.fillMaxWidth(),
+                                brandPrimary = brandPrimary,
+                                onPrimary = onPrimary
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            UpdatePromptSecondaryButton(
+                                onClick = onLater,
+                                modifier = Modifier.weight(1f),
+                                onPrimary = onPrimary,
+                                outline = outline
+                            )
+                            UpdatePromptPrimaryButton(
+                                onClick = onUpdate,
+                                modifier = Modifier.weight(1f),
+                                brandPrimary = brandPrimary,
+                                onPrimary = onPrimary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpdatePromptSecondaryButton(
+    onClick: () -> Unit,
+    modifier: Modifier,
+    onPrimary: Color,
+    outline: Color
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(54.dp),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, outline),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Color.White,
+            contentColor = onPrimary
+        )
+    ) {
+        Icon(
+            imageVector = Icons.Filled.AccessTime,
+            contentDescription = null,
+            modifier = Modifier.size(21.dp)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "Lembrar depois",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun UpdatePromptPrimaryButton(
+    onClick: () -> Unit,
+    modifier: Modifier,
+    brandPrimary: Color,
+    onPrimary: Color
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.height(54.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = brandPrimary,
+            contentColor = onPrimary
+        ),
+        elevation = ButtonDefaults.buttonElevation(
+            defaultElevation = 5.dp,
+            pressedElevation = 1.dp
+        )
+    ) {
+        Icon(
+            imageVector = Icons.Filled.FileDownload,
+            contentDescription = null,
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "Atualizar agora",
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1
+        )
     }
 }
 

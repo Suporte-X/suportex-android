@@ -32,6 +32,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,9 +61,14 @@ fun SupportHomeScreen(
     onOpenPrivacy: () -> Unit,
     onOpenTerms: () -> Unit,
     textMuted: Color,
-    averageWaitLabel: String
+    averageWaitLabel: String,
+    notificationState: NotificationCenterUiState = NotificationCenterUiState.Empty,
+    openNotificationCenterSignal: Int = 0,
+    onNotificationAction: (ClientNotificationUi) -> Unit = {},
+    onNotificationDismiss: (ClientNotificationUi) -> Unit = {}
 ) {
     var expandedPlans by rememberSaveable { mutableStateOf(false) }
+    var showNotificationCenter by rememberSaveable { mutableStateOf(false) }
     val clientName = homeSnapshot.client?.name
     val supportBlockedByCredits = homeSnapshot.isRegisteredWithoutCredit
     val freeFirstSupportPending = homeSnapshot.freeFirstSupportPending
@@ -76,6 +82,21 @@ fun SupportHomeScreen(
         "SOLICITAR SUPORTE"
     }
 
+    LaunchedEffect(openNotificationCenterSignal) {
+        if (openNotificationCenterSignal > 0) {
+            showNotificationCenter = true
+        }
+    }
+
+    if (showNotificationCenter) {
+        NotificationCenterDialog(
+            uiState = notificationState,
+            onDismiss = { showNotificationCenter = false },
+            onNotificationAction = onNotificationAction,
+            onNotificationDismiss = onNotificationDismiss
+        )
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -83,38 +104,48 @@ fun SupportHomeScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(48.dp))
-        if (freeFirstSupportPending) {
-            Text(
-                "1º Atendimento Grátis",
-                modifier = Modifier.fillMaxWidth(),
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 17.sp
-            )
-        } else {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expandedPlans = !expandedPlans },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            if (freeFirstSupportPending) {
                 Text(
-                    "Créditos:",
+                    "1º Atendimento Grátis",
+                    modifier = Modifier.weight(1f),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 17.sp
                 )
-                Spacer(Modifier.size(6.dp))
-                Text(
-                    creditsAvailable.toString(),
-                    color = creditValueColor,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 17.sp
-                )
-                Spacer(Modifier.size(4.dp))
-                Icon(
-                    imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (expandedPlans) "Ocultar status de créditos" else "Mostrar status de créditos"
-                )
+            } else {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { expandedPlans = !expandedPlans },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Créditos:",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp
+                    )
+                    Spacer(Modifier.size(6.dp))
+                    Text(
+                        creditsAvailable.toString(),
+                        color = creditValueColor,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    Icon(
+                        imageVector = if (expandedPlans) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expandedPlans) "Ocultar status de créditos" else "Mostrar status de créditos"
+                    )
+                }
             }
+            NotificationBellButton(
+                notificationState = notificationState,
+                onClick = { showNotificationCenter = true }
+            )
         }
 
         if (!freeFirstSupportPending && expandedPlans) {
