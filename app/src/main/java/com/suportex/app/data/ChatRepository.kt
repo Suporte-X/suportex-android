@@ -11,23 +11,63 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.suportex.app.Conn
 import com.suportex.app.data.model.Message
+import io.socket.client.Ack
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+
+internal fun isEquivalentPersistedOutgoingMessage(
+    existing: Map<String, Any?>,
+    expected: Map<String, Any?>
+): Boolean {
+    fun normalizedText(value: Any?): String? =
+        (value as? String)?.trim()?.takeIf { it.isNotBlank() }
+
+    fun normalizedNumber(value: Any?): Long? =
+        (value as? Number)?.toLong()
+
+    val requiredStringKeys = listOf("id", "sessionId", "from", "type", "status")
+    if (requiredStringKeys.any { key ->
+            normalizedText(existing[key]) != normalizedText(expected[key])
+        }
+    ) {
+        return false
+    }
+
+    val optionalStringKeys = listOf(
+        "text",
+        "imageUrl",
+        "fileUrl",
+        "audioUrl",
+        "contentType",
+        "mimeType",
+        "fileName"
+    )
+    if (optionalStringKeys.any { key ->
+            normalizedText(existing[key]) != normalizedText(expected[key])
+        }
+    ) {
+        return false
+    }
+
+    return normalizedNumber(existing["size"]) == normalizedNumber(expected["size"]) &&
+        normalizedNumber(existing["fileSize"]) == normalizedNumber(expected["fileSize"])
+}
 
 class ChatRepository {
     private val db = FirebaseDataSource.db
@@ -90,44 +130,30 @@ class ChatRepository {
         }
     }
 
-    suspend fun sendText(sessionId: String, from: String, text: String) {
+    suspend fun sendText(
+        sessionId: String,
+        from: String,
+        text: String,
+        messageId: String = UUID.randomUUID().toString(),
+        timestamp: Long = System.currentTimeMillis()
+    ): String {
         authRepository.ensureAnonAuth()
-        val messageId = UUID.randomUUID().toString()
-        val timestamp = System.currentTimeMillis()
+        val normalizedText = text.trim().take(MAX_TEXT_CHARS)
+        require(normalizedText.isNotBlank()) { "Mensagem vazia." }
         val payload = buildMessagePayload(
             sessionId = sessionId,
             id = messageId,
-            from = from,
+            from = normalizedClientSender(from),
             fromName = null,
-            text = text,
+            text = normalizedText,
             imageUrl = null,
             fileUrl = null,
             audioUrl = null,
             timestamp = timestamp,
             type = "text"
         )
-        db.collection("sessions").document(sessionId)
-            .collection("messages").document(messageId).set(payload).await()
-    }
-
-    suspend fun upsertIncoming(sessionId: String, message: Message) {
-        authRepository.ensureAnonAuth()
-        val collection = db.collection("sessions").document(sessionId)
-            .collection("messages")
-        val docId = message.id.takeIf { it.isNotBlank() } ?: collection.document().id
-        val payload = buildMessagePayload(
-            sessionId = sessionId,
-            id = docId,
-            from = message.from,
-            fromName = message.fromName,
-            text = message.text,
-            imageUrl = message.imageUrl ?: message.fileUrl,
-            fileUrl = message.fileUrl ?: message.imageUrl,
-            audioUrl = message.audioUrl,
-            timestamp = message.createdAt,
-            type = message.type
-        )
-        collection.document(docId).set(payload).await()
+        persistOutgoingMessage(sessionId, messageId, payload)
+        return messageId
     }
 
     suspend fun sendFile(sessionId: String, from: String, localUri: Uri): String =
@@ -150,7 +176,7 @@ class ChatRepository {
         val payload = buildMessagePayload(
             sessionId = sessionId,
             id = messageId,
-            from = from,
+            from = normalizedClientSender(from),
             fromName = null,
             text = null,
             imageUrl = uploaded.downloadURL,
@@ -162,8 +188,7 @@ class ChatRepository {
             size = uploaded.size,
             fileName = uploaded.fileName
         )
-        db.collection("sessions").document(sessionId)
-            .collection("messages").document(messageId).set(payload).await()
+        persistOutgoingMessage(sessionId, messageId, payload)
         return uploaded.downloadURL
     }
 
@@ -184,7 +209,7 @@ class ChatRepository {
         val payload = buildMessagePayload(
             sessionId = sessionId,
             id = messageId,
-            from = from,
+            from = normalizedClientSender(from),
             fromName = null,
             text = null,
             imageUrl = null,
@@ -196,9 +221,58 @@ class ChatRepository {
             size = uploaded.size,
             fileName = uploaded.fileName
         )
-        db.collection("sessions").document(sessionId)
-            .collection("messages").document(messageId).set(payload).await()
+        persistOutgoingMessage(sessionId, messageId, payload)
         return uploaded.downloadURL
+    }
+
+    private suspend fun persistOutgoingMessage(
+        sessionId: String,
+        messageId: String,
+        payload: Map<String, Any?>
+    ) {
+        authRepository.ensureAnonAuth()
+        val socketPayload = JSONObject().apply {
+            payload.forEach { (key, value) ->
+                if (value != null) put(key, value)
+            }
+        }
+        val socket = Conn.socket
+        val persistedByServer = if (socket?.connected() == true) {
+            val acknowledgment = CompletableDeferred<Boolean>()
+            socket.emit(
+                "session:chat:send",
+                socketPayload,
+                Ack { args ->
+                    val response = args.firstOrNull() as? JSONObject
+                    if (!acknowledgment.isCompleted) {
+                        acknowledgment.complete(response?.optBoolean("ok", false) == true)
+                    }
+                }
+            )
+            withTimeoutOrNull(CHAT_ACK_TIMEOUT_MS) { acknowledgment.await() } == true
+        } else {
+            false
+        }
+
+        if (persistedByServer) return
+
+        // Fallback idempotente para uma queda transitória do Socket. As regras
+        // permitem apenas criar mensagem do próprio cliente na sessão vinculada.
+        val messageRef = db.collection("sessions").document(sessionId)
+            .collection("messages").document(messageId)
+        try {
+            messageRef.set(payload).await()
+        } catch (writeError: Throwable) {
+            val existing = runCatching { messageRef.get().await() }.getOrNull()
+            val existingData = existing
+                ?.takeIf { it.exists() }
+                ?.data
+                .orEmpty()
+            if (isEquivalentPersistedOutgoingMessage(existingData, payload)) {
+                return
+            }
+            throw writeError
+        }
     }
 
     private suspend fun uploadSessionMedia(
@@ -212,15 +286,23 @@ class ChatRepository {
     ): UploadedMedia {
         val fileName = resolveFileName(localUri, fallbackPrefix)
         val contentType = resolveContentType(localUri, fallbackMime)
-        val bytes = readBytes(localUri)
-        if (bytes.isEmpty()) {
+        val declaredSize = resolveFileSize(localUri)
+        if (declaredSize == 0L) {
             throw IllegalArgumentException("Arquivo vazio.")
         }
-        if (bytes.size.toLong() > maxBytes) {
+        if (declaredSize != null && declaredSize > maxBytes) {
             throw IllegalArgumentException("Arquivo excede o limite de upload.")
         }
 
-        val requestBody = bytes.toRequestBody(contentType.toMediaTypeOrNull())
+        val requestBody = BoundedStreamRequestBody(
+            mediaType = contentType.toMediaTypeOrNull(),
+            declaredLength = declaredSize,
+            maxBytes = maxBytes,
+            openStream = {
+                appContext.contentResolver.openInputStream(localUri)
+                    ?: throw IOException("Não foi possível ler o arquivo selecionado.")
+            }
+        )
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("sessionId", sessionId)
@@ -251,7 +333,7 @@ class ChatRepository {
                     parseUploadResponse(
                         response = res,
                         fallbackContentType = contentType,
-                        fallbackSize = bytes.size.toLong(),
+                        fallbackSize = declaredSize ?: requestBody.transferredByteCount,
                         fallbackFileName = fileName
                     )
                 }
@@ -362,9 +444,22 @@ class ChatRepository {
         return fallbackMime
     }
 
-    private fun readBytes(localUri: Uri): ByteArray {
-        return appContext.contentResolver.openInputStream(localUri)?.use { it.readBytes() }
-            ?: throw IOException("N\u00e3o foi poss\u00edvel ler o arquivo selecionado.")
+    private fun resolveFileSize(localUri: Uri): Long? {
+        val resolver = appContext.contentResolver
+        val cursorSize = runCatching {
+            resolver.query(localUri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index < 0 || cursor.isNull(index)) null else cursor.getLong(index).coerceAtLeast(0L)
+            }
+        }.getOrNull()
+        if (cursorSize != null) return cursorSize
+
+        return runCatching {
+            resolver.openAssetFileDescriptor(localUri, "r")?.use { descriptor ->
+                descriptor.length.takeIf { it >= 0L }
+            }
+        }.getOrNull()
     }
 
     private fun buildMessagePayload(
@@ -413,6 +508,9 @@ class ChatRepository {
         return payload
     }
 
+    private fun normalizedClientSender(@Suppress("UNUSED_PARAMETER") requested: String): String =
+        "client"
+
     private data class UploadedMedia(
         val downloadURL: String,
         val contentType: String,
@@ -424,6 +522,8 @@ class ChatRepository {
         const val TAG = "SXS/ChatRepo"
         const val MAX_ATTACHMENT_BYTES = 10L * 1024L * 1024L
         const val MAX_AUDIO_BYTES = 20L * 1024L * 1024L
+        const val MAX_TEXT_CHARS = 2_000
+        const val CHAT_ACK_TIMEOUT_MS = 8_000L
     }
 }
 

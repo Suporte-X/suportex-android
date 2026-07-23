@@ -2,6 +2,8 @@ package com.suportex.app
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
@@ -76,7 +78,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.messaging.FirebaseMessaging
+import com.suportex.app.data.AccountDeletionFailureReason
+import com.suportex.app.data.AccountDeletionRepository
+import com.suportex.app.data.AccountDeletionResult
+import com.suportex.app.data.ActiveSupportSessionState
+import com.suportex.app.data.ActiveSupportSessionStore
+import com.suportex.app.data.ClientIdentityStore
 import com.suportex.app.data.ClientSupportRepository
 import com.suportex.app.data.ClientSupportRepository.SupportQueueWaitStats
 import com.suportex.app.data.ClientNotificationRecord
@@ -84,7 +94,13 @@ import com.suportex.app.data.ClientNotificationRepository
 import com.suportex.app.data.DeviceIdentity
 import com.suportex.app.data.FirebasePhoneIdentityProvider
 import com.suportex.app.data.PhonePnvVerificationResult
+import com.suportex.app.data.SupportCorrelationResult
+import com.suportex.app.data.SupportCorrelationStatus
 import com.suportex.app.data.SupportBillingConfig
+import com.suportex.app.data.SupportQueueConfirmation
+import com.suportex.app.data.SupportQueueConfirmationSource
+import com.suportex.app.data.SupportRequestCorrelation
+import com.suportex.app.data.SupportRequestToken
 import com.suportex.app.data.model.Message
 import com.suportex.app.data.AuthRepository
 import com.suportex.app.data.SessionClientInfo
@@ -99,11 +115,13 @@ import com.suportex.app.data.model.SupportStartContext
 import com.suportex.app.call.CallDirection
 import com.suportex.app.call.CallState
 import com.suportex.app.call.CallUiUpdate
+import com.suportex.app.call.VoiceCallForegroundService
 import com.suportex.app.call.VoiceCallManager
 import com.suportex.app.engagement.GooglePlayReviewPrompt
 import com.suportex.app.remote.AccessibilityUtils
 import com.suportex.app.remote.RemoteCommandBus
 import com.suportex.app.remote.RemoteControlService
+import com.suportex.app.remote.RemoteExecutor
 import com.suportex.app.ui.screens.CardPlaceholderScreen
 import com.suportex.app.ui.screens.ClientNotificationUi
 import com.suportex.app.ui.screens.ClientNotificationType
@@ -121,6 +139,7 @@ import com.google.android.play.core.appupdate.AppUpdateOptions
 import com.google.android.play.core.install.model.AppUpdateType
 import com.google.android.play.core.install.model.UpdateAvailability
 import io.socket.client.IO
+import io.socket.client.Ack
 import io.socket.client.Socket
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -132,13 +151,21 @@ import android.media.MediaRecorder
 import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -172,7 +199,11 @@ private const val EXTRA_WAITING_ANCHOR_ID = "extra_waiting_anchor_id"
 private const val PREFS_WAITING_SUPPORT = "waiting_support_runtime"
 private const val KEY_PENDING_SUPPORT_SESSION_ID = "pending_support_session_id"
 private const val WAITING_SESSION_RECOVERY_INTERVAL_MS = 4_000L
-private const val ACTION_OPEN_CLIENT_NOTIFICATION = "com.suportex.app.action.OPEN_CLIENT_NOTIFICATION"
+private const val SUPPORT_REQUEST_ACK_TIMEOUT_MS = 8_000L
+private const val SUPPORT_REQUEST_LEGACY_GRACE_MS = 2_000L
+private const val SUPPORT_REQUEST_MAX_ATTEMPTS = 2
+private const val ACCOUNT_DELETION_CONFIRMATION = "EXCLUIR CONTA"
+private const val KEY_ACCOUNT_DELETION_RESTART_PENDING = "account_deletion_restart_pending"
 
 private data class SupportFlowFlags(
     val showCreditPanelOnlyForRegisteredClients: Boolean = true,
@@ -180,6 +211,42 @@ private data class SupportFlowFlags(
     val technicianDrivenRegistrationEnabled: Boolean = true,
     val pnvPostRegistrationFlow: Boolean = true
 )
+
+private data class SupportRequestAck(
+    val ok: Boolean,
+    val requestId: String?,
+    val reused: Boolean,
+    val error: String?,
+    val message: String?,
+    val localSupportSessionId: String?
+)
+
+private sealed interface SupportRequestAttemptResult {
+    data class AckReceived(val ack: SupportRequestAck) : SupportRequestAttemptResult
+    data class QueueConfirmed(
+        val confirmation: SupportQueueConfirmation
+    ) : SupportRequestAttemptResult
+}
+
+private data class SupportQueueConfirmationWaiter(
+    val token: SupportRequestToken,
+    val deferred: CompletableDeferred<SupportQueueConfirmation>
+)
+
+private class SupportRequestRejectedException(
+    val errorCode: String?,
+    override val message: String
+) : Exception(message)
+
+private inline fun <T> runCatchingUnlessCancelled(block: () -> T): Result<T> {
+    return try {
+        Result.success(block())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -190,8 +257,10 @@ class MainActivity : ComponentActivity() {
 
     private val sessionRepository = SessionRepository()
     private val authRepository = AuthRepository()
+    private val accountDeletionRepository = AccountDeletionRepository(authRepository, http)
     private val clientSupportRepository = ClientSupportRepository()
     private val clientNotificationRepository = ClientNotificationRepository()
+    private val clientIdentityStore by lazy { ClientIdentityStore(applicationContext) }
     private val phoneIdentityProvider by lazy { FirebasePhoneIdentityProvider(applicationContext) }
     private val googlePlayReviewPrompt by lazy { GooglePlayReviewPrompt(applicationContext) }
     private val supportFlowFlags = SupportFlowFlags()
@@ -200,7 +269,6 @@ class MainActivity : ComponentActivity() {
     // Bridges Activity -> Compose (ja existiam)
     private var setIsSharingFromLauncher: ((Boolean) -> Unit)? = null
     private var setSystemMessageFromLauncher: ((String?) -> Unit)? = null
-    private var requestOpenClientNotificationCenterFromLauncher: (() -> Unit)? = null
 
     // Bridges Socket -> Compose (novos)
     private var setRequestIdFromSocket: ((String?) -> Unit)? = null
@@ -224,15 +292,27 @@ class MainActivity : ComponentActivity() {
     private var callingActive = false
     private var callConnectedActive = false
     private var shareRequestFromCommand = false
+    private var screenSharingConsentAcceptedForCurrentSession = false
     private var remoteConsentAcceptedForCurrentSession = false
     private var pendingRemoteEnableAfterAccessibility = false
     private var pendingAudioAction: (() -> Unit)? = null
+    private val audioRecordingLock = Any()
+    private var audioRecordingGeneration = 0L
+    private var audioRecordingStartInProgress = false
     private var mediaRecorder: MediaRecorder? = null
     private var audioTempFile: File? = null
+    private var audioRecordingSessionId: String? = null
+    private val supportRequestCorrelation = SupportRequestCorrelation()
+    @Volatile
+    private var supportQueueConfirmationWaiter: SupportQueueConfirmationWaiter? = null
+    private var supportRequestJob: Job? = null
     private var activeSupportRequestId: String? = null
     private var pendingSupportStartContext: SupportStartContext? = null
     private var pendingSupportSessionId: String? = null
     private var waitingSessionRecoveryJob: Job? = null
+    private val activeSupportSessionStore by lazy {
+        ActiveSupportSessionStore(applicationContext)
+    }
     private var pnvFlowInProgress = false
     private var appInForeground = false
     private var initialPermissionsPromptedThisLaunch = false
@@ -241,7 +321,6 @@ class MainActivity : ComponentActivity() {
     private var pendingLaunchAcceptedSessionId: String? = null
     private var pendingLaunchAcceptedTechName: String? = null
     private var pendingLaunchAcceptedLocalSupportSessionId: String? = null
-    private var pendingOpenClientNotificationCenter = false
     private var currentCallUiState: CallState = CallState.IDLE
     private var currentCallDirection: CallDirection? = null
     private var incomingCallRingtone: Ringtone? = null
@@ -250,6 +329,39 @@ class MainActivity : ComponentActivity() {
     private var appUpdatePromptVisible = false
     private var appUpdatePromptShownThisLaunch = false
     private var appUpdateDialog: Dialog? = null
+    @Volatile
+    private var accountDeletionOperationInProgress = false
+    @Volatile
+    private var accountDeletionRestartPending = false
+    private var clientNotificationRegistration: ListenerRegistration? = null
+    private val accountDeletionAuthStateListener = FirebaseAuth.AuthStateListener { auth ->
+        if (accountDeletionRestartPending && auth.currentUser != null) {
+            authRepository.signOut()
+        }
+    }
+    private var waitingCancellationReceiverRegistered = false
+    private val waitingCancellationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != WaitingSupportMonitorService.ACTION_WAITING_SUPPORT_CANCELLED) {
+                return
+            }
+            val cancelledLocalId = intent.getStringExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: return
+            if (pendingSupportSessionId != cancelledLocalId) return
+
+            invalidateSupportRequestTracking(cancelJob = true)
+            activeSupportRequestId = null
+            setPendingSupportSession(null)
+            pendingSupportStartContext = null
+            stopWaitingSessionRecovery()
+            setRequestIdFromSocket?.invoke(null)
+            setSessionIdFromSocket?.invoke(null)
+            setScreenFromSocket?.invoke(Screen.HOME)
+            setSystemMessageFromLauncher?.invoke("Espera cancelada.")
+        }
+    }
 
     // -------- Helpers --------
     @Suppress("unused")
@@ -266,6 +378,26 @@ class MainActivity : ComponentActivity() {
         val cb = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cb.setPrimaryClip(ClipData.newPlainText(label, text))
         Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun registerWaitingCancellationReceiver() {
+        if (waitingCancellationReceiverRegistered) return
+        ContextCompat.registerReceiver(
+            this,
+            waitingCancellationReceiver,
+            IntentFilter(WaitingSupportMonitorService.ACTION_WAITING_SUPPORT_CANCELLED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        waitingCancellationReceiverRegistered = true
+    }
+
+    private fun unregisterWaitingCancellationReceiver() {
+        if (!waitingCancellationReceiverRegistered) return
+        runCatching { unregisterReceiver(waitingCancellationReceiver) }
+            .onFailure { error ->
+                Log.w("SXS/Main", "Falha ao remover receptor de cancelamento da espera", error)
+            }
+        waitingCancellationReceiverRegistered = false
     }
 
     private fun readPendingSupportSessionFromPrefs(): String? {
@@ -309,58 +441,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startSessionAnchorForegroundService(sessionId: String, techName: String?) {
-        val normalizedSessionId = sessionId.trim()
-        if (normalizedSessionId.isBlank()) return
-        val intent = Intent(this, SessionAnchorService::class.java).apply {
-            action = SessionAnchorService.ACTION_START_SESSION_ANCHOR
-            putExtra(EXTRA_SESSION_ID, normalizedSessionId)
-            putExtra(EXTRA_TECH_NAME, techName)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching { startForegroundService(intent) }
-                .onFailure { err ->
-                    Log.w("SXS/Main", "Falha ao iniciar ancora de sessao via foreground", err)
-                    runCatching { startService(intent) }
-                        .onFailure { fallbackErr ->
-                            Log.w("SXS/Main", "Falha ao iniciar ancora de sessao via fallback", fallbackErr)
-                        }
-                }
-        } else {
-            runCatching { startService(intent) }
-                .onFailure { err -> Log.w("SXS/Main", "Falha ao iniciar ancora de sessao", err) }
-        }
-    }
-
-    private fun stopSessionAnchorForegroundService() {
-        runCatching {
-            val intent = Intent(this, SessionAnchorService::class.java).apply {
-                action = SessionAnchorService.ACTION_STOP_SESSION_ANCHOR
-            }
-            startService(intent)
-        }.onFailure { err ->
-            Log.w("SXS/Main", "Falha ao solicitar parada da ancora de sessao", err)
-            runCatching { stopService(Intent(this, SessionAnchorService::class.java)) }
-                .onFailure { stopErr ->
-                    Log.w("SXS/Main", "Falha ao parar ancora de sessao via stopService", stopErr)
-                }
-        }
-    }
-
-    private fun syncSessionAnchorForegroundService() {
-        val sessionId = currentSessionId
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-        if (sessionId.isNullOrBlank()) {
-            stopSessionAnchorForegroundService()
-            return
-        }
-        startSessionAnchorForegroundService(
-            sessionId = sessionId,
-            techName = Conn.techName
-        )
-    }
-
     private fun syncWaitingSupportForegroundService() {
         val anchorId = pendingSupportSessionId
             ?.trim()
@@ -385,8 +465,115 @@ class MainActivity : ComponentActivity() {
         syncWaitingSupportForegroundService()
     }
 
-    private fun loadSupportQueueWaitStats(onResult: (SupportQueueWaitStats) -> Unit) {
+    private fun isAccountIdentityWorkBlocked(): Boolean =
+        accountDeletionOperationInProgress || accountDeletionRestartPending
+
+    private fun disconnectAuthenticatedSocketForAccountDeletion() {
+        val authenticatedSocket = if (this::socket.isInitialized) socket else Conn.socket
+        runCatching { authenticatedSocket?.off() }
+        runCatching { authenticatedSocket?.disconnect() }
+        Conn.socket = null
+    }
+
+    private suspend fun clearLocalStateAfterAccountDeletion() {
+        accountDeletionRestartPending = true
+        runCatching { clientNotificationRegistration?.remove() }
+        clientNotificationRegistration = null
+        disconnectAuthenticatedSocketForAccountDeletion()
+
+        invalidateSupportRequestTracking(cancelJob = true)
+        activeSupportRequestId = null
+        pendingSupportStartContext = null
+        setPendingSupportSession(null)
+        stopWaitingSessionRecovery()
+        stopWaitingSupportForegroundService()
+        stopTelemetryLoop()
+        discardAudioRecording()
+        stopIncomingCallAlert()
+
+        currentSessionId = null
+        activeSupportSessionStore.clear()
+        Conn.sessionId = null
+        Conn.techName = null
+        Conn.chatRepository = null
+        pendingLaunchSessionFromNotification = null
+        pendingLaunchFeedbackSessionId = null
+        pendingLaunchAcceptedSessionId = null
+        pendingLaunchAcceptedTechName = null
+        pendingLaunchAcceptedLocalSupportSessionId = null
+        runCatching { voiceCallManager.bindSession(null) }
+        runCatching { resetSessionState() }
+
+        runCatching { phoneIdentityProvider.saveVerifiedPhoneNumber(null) }
+        runCatching { clientIdentityStore.clear() }
+        runCatching { authRepository.signOut() }
+        runCatching {
+            getSystemService(NotificationManager::class.java)?.cancelAll()
+        }
+    }
+
+    private fun persistActiveSupportSession(
+        realtimeSessionId: String,
+        localSupportSessionId: String?,
+        techName: String?
+    ) {
+        val normalizedRealtimeId = realtimeSessionId.trim().takeIf { it.isNotBlank() } ?: return
+        val previous = activeSupportSessionStore.read()
+            ?.takeIf { it.realtimeSessionId == normalizedRealtimeId }
+        activeSupportSessionStore.write(
+            ActiveSupportSessionState(
+                realtimeSessionId = normalizedRealtimeId,
+                localSupportSessionId = localSupportSessionId
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: previous?.localSupportSessionId,
+                techName = techName
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: previous?.techName,
+                acceptedAtMillis = previous?.acceptedAtMillis
+                    ?.takeIf { it > 0L }
+                    ?: System.currentTimeMillis()
+            )
+        )
+    }
+
+    private fun recoveryLocalSupportSessionId(realtimeSessionId: String): String? {
+        val normalizedRealtimeId = realtimeSessionId.trim()
+        return pendingSupportSessionId
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: activeSupportSessionStore.read()
+                ?.takeIf { it.realtimeSessionId == normalizedRealtimeId }
+                ?.localSupportSessionId
+    }
+
+    private fun recoverPersistedActiveSupportSession() {
+        if (!currentSessionId.isNullOrBlank() || isAccountIdentityWorkBlocked()) return
+        val persisted = activeSupportSessionStore.read() ?: return
+        val localSupportSessionId = persisted.localSupportSessionId ?: return
+
         lifecycleScope.launch(Dispatchers.IO) {
+            val recovered = runCatching {
+                clientSupportRepository.findActiveRealtimeSession(localSupportSessionId)
+            }.getOrNull() ?: return@launch
+
+            runOnUiThread {
+                if (currentSessionId.isNullOrBlank() && !isAccountIdentityWorkBlocked()) {
+                    handleSupportAccepted(
+                        sessionId = recovered.sessionId,
+                        techName = recovered.techName ?: persisted.techName,
+                        source = "persisted_session_recovery"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun loadSupportQueueWaitStats(onResult: (SupportQueueWaitStats) -> Unit) {
+        if (isAccountIdentityWorkBlocked()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (isAccountIdentityWorkBlocked()) return@launch
             val stats = runCatching { clientSupportRepository.loadSupportQueueWaitStats() }
                 .getOrElse {
                     SupportQueueWaitStats(
@@ -396,7 +583,11 @@ class MainActivity : ComponentActivity() {
                         averageWaitMillis = null
                     )
                 }
-            runOnUiThread { onResult(stats) }
+            runOnUiThread {
+                if (!isAccountIdentityWorkBlocked()) {
+                    onResult(stats)
+                }
+            }
         }
     }
 
@@ -644,58 +835,94 @@ class MainActivity : ComponentActivity() {
         emitTelemetry()
     }
 
-    private fun ensureRemoteAccessConsent(onApproved: () -> Unit) {
-        if (remoteConsentAcceptedForCurrentSession) {
+    private fun ensureScreenSharingConsent(onApproved: () -> Unit) {
+        if (screenSharingConsentAcceptedForCurrentSession) {
             onApproved()
             return
         }
 
         val message = """
-            O Suporte X usa permissões temporárias somente durante uma sessão de suporte iniciada por você.
+            Ao continuar, o Android solicitará autorização para compartilhar a tela.
 
-            Para permitir o atendimento, o app pode solicitar:
+            Durante esta sessão de suporte iniciada por você, o técnico designado poderá visualizar tudo o que aparecer na tela compartilhada, inclusive notificações ou informações sensíveis que você abrir.
 
-            - compartilhamento de tela, para o técnico visualizar o problema;
-            - Serviço de Acessibilidade, para executar toques, rolagens, botão voltar/home e digitação assistida quando você autorizar o acesso remoto;
-            - leitura do campo de texto em foco apenas para permitir digitação remota durante o suporte;
-            - envio de arquivos e informações técnicas da sessão.
-
-            Essas informações podem ser visualizadas pelo técnico responsável apenas durante o atendimento. O Suporte X não usa o Serviço de Acessibilidade para publicidade, monitoramento oculto, coleta fora da sessão ou ações sem autorização.
-
-            Você pode recusar, parar o compartilhamento, desligar o acesso remoto ou encerrar o suporte a qualquer momento.
-
-            Ao continuar, você confirma que entendeu e autoriza temporariamente as permissões necessárias para o atendimento.
+            O compartilhamento não ativa o Serviço de Acessibilidade e pode ser interrompido a qualquer momento pelo botão de compartilhamento ou pelo encerramento da sessão.
         """.trimIndent()
 
         AlertDialog.Builder(this)
-            .setTitle("Autorização de acesso remoto")
+            .setTitle("Compartilhar tela com o técnico")
             .setMessage(message)
             .setCancelable(true)
-            .setNegativeButton("Cancelar") { dialog, _ ->
+            .setNegativeButton("Agora não") { dialog, _ ->
+                shareRequestFromCommand = false
                 dialog.dismiss()
             }
-            .setPositiveButton("Continuar") { dialog, _ ->
-                remoteConsentAcceptedForCurrentSession = true
+            .setPositiveButton("Concordo e continuar") { dialog, _ ->
+                screenSharingConsentAcceptedForCurrentSession = true
                 dialog.dismiss()
                 onApproved()
             }
             .show()
     }
 
+    private fun showAccessibilityDisclosure(
+        grantForCurrentSession: Boolean,
+        onAccepted: () -> Unit
+    ) {
+        val message = """
+            O Serviço de Acessibilidade do Suporte X permite que o técnico designado:
+
+            • leia o conteúdo exibido e as janelas do dispositivo para localizar campos e controles;
+            • execute toques e gestos;
+            • use Voltar, Início e Recentes;
+            • digite e edite texto nos campos em foco.
+
+            Esse acesso é usado somente durante uma sessão de suporte iniciada por você. Ele não é usado para anúncios, monitoramento oculto nem ações fora da sessão.
+
+            O serviço é uma configuração do Android e pode permanecer ativado até você desativá-lo nas Configurações. O Suporte X bloqueia comandos fora da sessão ativa e tenta desativar o serviço quando o atendimento é encerrado normalmente.
+        """.trimIndent()
+
+        AlertDialog.Builder(this)
+            .setTitle("Uso do Serviço de Acessibilidade")
+            .setMessage(message)
+            .setCancelable(true)
+            .setNegativeButton("Agora não") { dialog, _ ->
+                if (grantForCurrentSession) {
+                    pendingRemoteEnableAfterAccessibility = false
+                    remoteConsentAcceptedForCurrentSession = false
+                }
+                dialog.dismiss()
+            }
+            .setPositiveButton("Concordo e abrir Acessibilidade") { dialog, _ ->
+                if (grantForCurrentSession) {
+                    remoteConsentAcceptedForCurrentSession = true
+                }
+                dialog.dismiss()
+                onAccepted()
+            }
+            .show()
+    }
+
     private fun requestRemoteStateChange(enabled: Boolean) {
         if (enabled) {
-            ensureRemoteAccessConsent {
-                if (!isAccessibilityServiceEnabled()) {
-                    pendingRemoteEnableAfterAccessibility = true
-                    openAccessibilitySettings()
-                    setSystemMessageFromLauncher?.invoke("Ative em Acessibilidade > Suporte X > Ativar para permitir o controle remoto.")
-                    updateRemoteState(enabled = false, origin = "client")
-                    sendCommand("remote_revoke")
-                    return@ensureRemoteAccessConsent
-                }
+            if (
+                remoteConsentAcceptedForCurrentSession &&
+                isAccessibilityServiceEnabled()
+            ) {
                 pendingRemoteEnableAfterAccessibility = false
                 updateRemoteState(enabled = true, origin = "client")
                 sendCommand("remote_enable")
+                return
+            }
+
+            showAccessibilityDisclosure(grantForCurrentSession = true) {
+                pendingRemoteEnableAfterAccessibility = true
+                updateRemoteState(enabled = false, origin = "client")
+                sendCommand("remote_revoke")
+                setSystemMessageFromLauncher?.invoke(
+                    "Ative Suporte X na tela de Acessibilidade e volte ao app para permitir o controle remoto."
+                )
+                openAccessibilitySettings()
             }
             return
         }
@@ -713,7 +940,11 @@ class MainActivity : ComponentActivity() {
         }
 
         val accessibilityEnabled = isAccessibilityServiceEnabled()
-        if (accessibilityEnabled && (pendingRemoteEnableAfterAccessibility || remoteEnabledActive)) {
+        if (
+            remoteConsentAcceptedForCurrentSession &&
+            accessibilityEnabled &&
+            (pendingRemoteEnableAfterAccessibility || remoteEnabledActive)
+        ) {
             pendingRemoteEnableAfterAccessibility = false
             if (!remoteEnabledActive) {
                 updateRemoteState(enabled = true, origin = "client")
@@ -723,7 +954,7 @@ class MainActivity : ComponentActivity() {
                 emitTelemetry()
             }
             sendCommand("remote_enable")
-            setSystemMessageFromLauncher?.invoke("Acesso remoto autorizado para esta sessao.")
+            setSystemMessageFromLauncher?.invoke("Acesso remoto autorizado para esta sessão.")
             return
         }
 
@@ -1041,9 +1272,6 @@ class MainActivity : ComponentActivity() {
         prefs.edit { putBoolean(KEY_INITIAL_PERMISSIONS_REQUESTED, true) }
 
         val runtimePermissions = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            runtimePermissions.add(Manifest.permission.RECORD_AUDIO)
-        }
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -1057,10 +1285,23 @@ class MainActivity : ComponentActivity() {
 
     private fun handleLaunchIntent(intent: Intent?) {
         val action = intent?.action.orEmpty()
+        val isInternalNotificationAction =
+            action == ACTION_OPEN_SESSION_CHAT ||
+                action == ACTION_OPEN_SESSION_FEEDBACK ||
+                action == ACTION_WAITING_SUPPORT_ACCEPTED
+        if (isInternalNotificationAction && !InternalLaunchGuard.isTrusted(this, intent)) {
+            Log.w("SXS/Main", "Ação interna de notificação sem autenticação foi ignorada")
+            intent?.action = Intent.ACTION_MAIN
+            intent?.removeExtra(EXTRA_SESSION_ID)
+            intent?.removeExtra(EXTRA_TECH_NAME)
+            intent?.removeExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
+            InternalLaunchGuard.sanitize(intent)
+            return
+        }
+
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)?.trim().orEmpty().ifBlank { null }
         when (action) {
             ACTION_OPEN_SESSION_CHAT -> pendingLaunchSessionFromNotification = sessionId
-            ACTION_OPEN_CLIENT_NOTIFICATION -> pendingOpenClientNotificationCenter = true
             ACTION_OPEN_SESSION_FEEDBACK -> pendingLaunchFeedbackSessionId = sessionId
             ACTION_WAITING_SUPPORT_ACCEPTED -> {
                 pendingLaunchAcceptedSessionId = sessionId
@@ -1072,28 +1313,17 @@ class MainActivity : ComponentActivity() {
                     ?.takeIf { it.isNotBlank() }
             }
         }
-        if (
-            action == ACTION_OPEN_SESSION_CHAT ||
-            action == ACTION_OPEN_CLIENT_NOTIFICATION ||
-            action == ACTION_OPEN_SESSION_FEEDBACK ||
-            action == ACTION_WAITING_SUPPORT_ACCEPTED
-        ) {
+        if (isInternalNotificationAction) {
             // Evita reprocessar a mesma acao em recriacoes da Activity (ex.: rotacao de tela).
             intent?.action = Intent.ACTION_MAIN
             intent?.removeExtra(EXTRA_SESSION_ID)
             intent?.removeExtra(EXTRA_TECH_NAME)
             intent?.removeExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
+            InternalLaunchGuard.sanitize(intent)
         }
     }
 
     private fun applyPendingLaunchIntentNavigation() {
-        if (pendingOpenClientNotificationCenter) {
-            pendingOpenClientNotificationCenter = false
-            setScreenFromSocket?.invoke(Screen.HOME)
-            requestOpenClientNotificationCenterFromLauncher?.invoke()
-            return
-        }
-
         val feedbackSessionId = pendingLaunchFeedbackSessionId
         if (!feedbackSessionId.isNullOrBlank()) {
             pendingLaunchFeedbackSessionId = null
@@ -1139,8 +1369,9 @@ class MainActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch(Dispatchers.IO) {
+            val localSupportSessionId = recoveryLocalSupportSessionId(normalizedSessionId)
             val activeRealtimeSession = runCatching {
-                clientSupportRepository.findActiveRealtimeSession(pendingSupportSessionId)
+                clientSupportRepository.findActiveRealtimeSession(localSupportSessionId)
             }.getOrNull()
             val sessionToOpen = activeRealtimeSession?.takeIf {
                 it.sessionId.trim() == normalizedSessionId
@@ -1182,11 +1413,14 @@ class MainActivity : ComponentActivity() {
             description = "Notificacoes de novas mensagens durante o suporte."
         )
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_CHAT
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = InternalLaunchGuard.attach(
+            this,
+            Intent(this, MainActivity::class.java).apply {
+                action = ACTION_OPEN_SESSION_CHAT
+                putExtra(EXTRA_SESSION_ID, sessionId)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        )
         val pendingIntent = PendingIntent.getActivity(
             this,
             abs(sessionId.hashCode()),
@@ -1252,11 +1486,10 @@ class MainActivity : ComponentActivity() {
             }
             val isPersistentForeground = notificationId == 1 ||
                 notificationId == 6_100 ||
-                notificationId == 6_200 ||
+                notificationId == VoiceCallForegroundService.NOTIFICATION_ID ||
                 channelId == "screen_capture" ||
                 channelId == "suportex_waiting_queue" ||
-                channelId == "suportex_session_anchor" ||
-                channelId == "suportex_session_anchor_v2"
+                channelId == VoiceCallForegroundService.NOTIFICATION_CHANNEL_ID
             if (!isPersistentForeground) {
                 manager.cancel(notificationId)
             }
@@ -1266,7 +1499,6 @@ class MainActivity : ComponentActivity() {
     private fun clearAllSupportNotificationsAfterFeedback() {
         stopIncomingCallAlert()
         stopWaitingSupportForegroundService()
-        stopSessionAnchorForegroundService()
         requestScreenCaptureServiceStop("limpeza final")
         runCatching {
             getSystemService(NotificationManager::class.java)?.cancelAll()
@@ -1349,11 +1581,14 @@ class MainActivity : ComponentActivity() {
         if (!isNotificationPermissionGranted()) return
         ensureCallNotificationChannel()
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_CHAT
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = InternalLaunchGuard.attach(
+            this,
+            Intent(this, MainActivity::class.java).apply {
+                action = ACTION_OPEN_SESSION_CHAT
+                putExtra(EXTRA_SESSION_ID, sessionId)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        )
         val pendingIntent = PendingIntent.getActivity(
             this,
             callNotificationId(sessionId),
@@ -1409,9 +1644,9 @@ class MainActivity : ComponentActivity() {
     private fun buildSessionEndedNotificationBody(reason: String?): String {
         val normalizedReason = normalizeSessionEndReason(reason)
         return if (normalizedReason == "Atendimento encerrado.") {
-            "Seu atendimento foi encerrado. Toque para avaliar."
+            "Seu atendimento foi encerrado. Toque para abrir."
         } else {
-            normalizedReason
+            "${normalizedReason.trimEnd('.', ' ')}. Toque para abrir."
         }
     }
 
@@ -1431,89 +1666,35 @@ class MainActivity : ComponentActivity() {
         )
 
         val body = buildSessionEndedNotificationBody(reason)
-        val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
-        val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Atendimento encerrado")
             .setContentText(body)
-            .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setContentIntent(pendingIntent)
-        if (canUseFullscreen) {
-            notificationBuilder.setFullScreenIntent(pendingIntent, true)
-        }
-        val notification = notificationBuilder.build()
+            .build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
         manager.notify(sessionEndedNotificationId(sessionId), notification)
     }
 
-    private fun canUseFullScreenIntent(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
-        val manager = getSystemService(NotificationManager::class.java) ?: return false
-        return manager.canUseFullScreenIntent()
-    }
-
     private fun buildSessionLaunchPendingIntent(action: String, sessionId: String, requestCode: Int): PendingIntent {
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            this.action = action
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = InternalLaunchGuard.attach(
+            this,
+            Intent(this, MainActivity::class.java).apply {
+                this.action = action
+                putExtra(EXTRA_SESSION_ID, sessionId)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        )
         return PendingIntent.getActivity(
             this,
             requestCode,
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    private fun forceOpenMainActivity(
-        action: String,
-        sessionId: String,
-        requestCode: Int,
-        source: String
-    ) {
-        val pendingIntent = buildSessionLaunchPendingIntent(action, sessionId, requestCode)
-        val launchedViaPendingIntent = runCatching {
-            pendingIntent.send()
-            true
-        }.getOrElse { error ->
-            Log.w("SXS/Main", "Falha ao abrir app por PendingIntent ($source)", error)
-            false
-        }
-        Log.i(
-            "SXS/Main",
-            "ForceOpen source=$source action=$action session=$sessionId foreground=$appInForeground pendingSent=$launchedViaPendingIntent"
-        )
-        if (launchedViaPendingIntent) return
-
-        val launchIntent = Intent(this, MainActivity::class.java).apply {
-            this.action = action
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        runCatching { startActivity(launchIntent) }
-            .onFailure { err -> Log.w("SXS/Main", "Falha ao abrir app via startActivity ($source)", err) }
-    }
-
-    private fun bringAppToForegroundForFeedback(sessionId: String) {
-        forceOpenMainActivity(
-            action = ACTION_OPEN_SESSION_FEEDBACK,
-            sessionId = sessionId,
-            requestCode = abs(sessionId.hashCode()) + 10_001,
-            source = "feedback"
-        )
-    }
-
-    private fun bringAppToForegroundForSession(sessionId: String) {
-        forceOpenMainActivity(
-            action = ACTION_OPEN_SESSION_CHAT,
-            sessionId = sessionId,
-            requestCode = abs(sessionId.hashCode()) + 8_001,
-            source = "session"
         )
     }
 
@@ -1532,21 +1713,17 @@ class MainActivity : ComponentActivity() {
             requestCode = abs(sessionId.hashCode()) + 8_000
         )
 
-        val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
-        val canUseFullscreen = !appInForeground && canUseFullScreenIntent()
-        val notificationBuilder = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
+        val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Técnico"
+        val notification = NotificationCompat.Builder(this, SESSION_NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Atendimento iniciado")
-            .setContentText("$techLabel iniciou seu atendimento. Abrindo o Suporte X...")
-            .setPriority(if (canUseFullscreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_HIGH)
+            .setContentText("$techLabel iniciou seu atendimento. Toque para abrir.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
             .setContentIntent(pendingIntent)
-        if (canUseFullscreen) {
-            notificationBuilder.setFullScreenIntent(pendingIntent, true)
-        }
-        val notification = notificationBuilder.build()
+            .build()
 
         val manager = getSystemService(NotificationManager::class.java) ?: return
         manager.notify(supportAcceptedNotificationId(sessionId), notification)
@@ -1586,14 +1763,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleSupportAccepted(sessionId: String, techName: String?, source: String) {
+        if (isAccountIdentityWorkBlocked()) return
         val sid = sessionId.trim()
         if (sid.isBlank()) return
         val resolvedTechName = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
 
         if (currentSessionId == sid) {
             Conn.techName = resolvedTechName
-            startSessionAnchorForegroundService(sid, resolvedTechName)
             activeSupportRequestId = null
+            persistActiveSupportSession(
+                realtimeSessionId = sid,
+                localSupportSessionId = recoveryLocalSupportSessionId(sid),
+                techName = resolvedTechName
+            )
             syncWaitingSupportForegroundService()
             runOnUiThread {
                 setTechNameFromSocket?.invoke(resolvedTechName)
@@ -1601,13 +1783,17 @@ class MainActivity : ComponentActivity() {
                 setSessionIdFromSocket?.invoke(sid)
                 setScreenFromSocket?.invoke(Screen.SESSION)
             }
-            if (!appInForeground) {
-                bringAppToForegroundForSession(sid)
-            }
+            if (!appInForeground) notifySupportAcceptedByTech(sid, resolvedTechName)
             return
         }
 
-        val localSupportSessionId = pendingSupportSessionId
+        val localSupportSessionId = recoveryLocalSupportSessionId(sid)
+        persistActiveSupportSession(
+            realtimeSessionId = sid,
+            localSupportSessionId = localSupportSessionId,
+            techName = resolvedTechName
+        )
+        finishSupportRequestTracking(localSupportSessionId)
         activeSupportRequestId = null
         setPendingSupportSession(null)
         pendingSupportStartContext = null
@@ -1619,7 +1805,6 @@ class MainActivity : ComponentActivity() {
         currentSessionId = sid
         remoteConsentAcceptedForCurrentSession = false
         resetSessionState()
-        startSessionAnchorForegroundService(sid, resolvedTechName)
         voiceCallManager.bindSession(sid)
         registerSessionStart(sid, resolvedTechName)
 
@@ -1638,13 +1823,7 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             val joinToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
-            val joinPayload = JSONObject().apply {
-                put("sessionId", sid)
-                put("role", "client")
-                if (joinToken.isNotBlank()) put("idToken", joinToken)
-            }
-            socket.emit("session:join", joinPayload)
-            socket.emit("join", joinPayload)
+            emitSessionJoin(sid, joinToken)
         }
 
         startTelemetryLoop()
@@ -1656,7 +1835,6 @@ class MainActivity : ComponentActivity() {
 
         if (!appInForeground) {
             notifySupportAcceptedByTech(sid, resolvedTechName)
-            bringAppToForegroundForSession(sid)
         }
     }
 
@@ -1688,9 +1866,6 @@ class MainActivity : ComponentActivity() {
             type = incomingType,
             createdAt = createdAt
         )
-        lifecycleScope.launch(Dispatchers.IO) {
-            runCatching { Conn.chatRepository?.upsertIncoming(sid, message) }
-        }
         if (message.from.equals("tech", ignoreCase = true)) {
             notifyIncomingChatMessage(sid, message)
         }
@@ -1736,6 +1911,9 @@ class MainActivity : ComponentActivity() {
     private fun resetSessionState() {
         isSharingActive = false
         remoteEnabledActive = false
+        screenSharingConsentAcceptedForCurrentSession = false
+        remoteConsentAcceptedForCurrentSession = false
+        pendingRemoteEnableAfterAccessibility = false
         RemoteCommandBus.setRemoteEnabled(false)
         callingActive = false
         callConnectedActive = false
@@ -1787,44 +1965,103 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startAudioRecording() {
-        val sid = currentSessionId
-        if (sid.isNullOrBlank()) {
+        val sid = currentSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (sid == null) {
             setSystemMessageFromLauncher?.invoke("Sessao ainda nao aceita pelo tecnico.")
             return
         }
+        if (!appInForeground) return
+
+        val generation = synchronized(audioRecordingLock) {
+            if (audioRecordingStartInProgress || mediaRecorder != null) return
+            audioRecordingStartInProgress = true
+            audioRecordingGeneration += 1
+            audioRecordingGeneration
+        }
+
         lifecycleScope.launch(Dispatchers.IO) {
-            var recorder: MediaRecorder? = null
-            val result = runCatching {
-                val outFile = File.createTempFile("sx_audio_", ".m4a", cacheDir)
-                recorder = createMediaRecorder().apply {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                    setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                    setAudioSamplingRate(44100)
-                    setAudioEncodingBitRate(96000)
-                    setOutputFile(outFile.absolutePath)
-                    prepare()
-                    start()
+            var recordingInstalled = false
+            var initializationFailed = false
+
+            synchronized(audioRecordingLock) {
+                if (
+                    generation != audioRecordingGeneration ||
+                    !audioRecordingStartInProgress ||
+                    currentSessionId != sid ||
+                    !appInForeground
+                ) {
+                    return@synchronized
                 }
-                (recorder ?: throw IllegalStateException("MediaRecorder nao inicializado")) to outFile
-            }
-            if (result.isFailure) {
-                runCatching {
-                    recorder?.reset()
-                    recorder?.release()
+
+                var recorder: MediaRecorder? = null
+                var outFile: File? = null
+                var recorderStarted = false
+                try {
+                    val createdFile = File.createTempFile("sx_audio_", ".m4a", cacheDir)
+                    outFile = createdFile
+                    recorder = createMediaRecorder().apply {
+                        setAudioSource(MediaRecorder.AudioSource.MIC)
+                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setAudioSamplingRate(44100)
+                        setAudioEncodingBitRate(96000)
+                        setOutputFile(createdFile.absolutePath)
+                        prepare()
+                        start()
+                    }
+                    recorderStarted = true
+
+                    if (
+                        generation == audioRecordingGeneration &&
+                        audioRecordingStartInProgress &&
+                        currentSessionId == sid &&
+                        appInForeground
+                    ) {
+                        mediaRecorder = recorder
+                        audioTempFile = outFile
+                        audioRecordingSessionId = sid
+                        audioRecordingStartInProgress = false
+                        recorder = null
+                        outFile = null
+                        recordingInstalled = true
+                    }
+                } catch (error: Exception) {
+                    initializationFailed = true
+                    Log.w("SXS/Main", "Falha ao iniciar gravacao de audio", error)
+                } finally {
+                    if (recorder != null) {
+                        releaseMediaRecorderSafely(recorder, stopFirst = recorderStarted)
+                    }
+                    runCatching { outFile?.delete() }
+                    if (
+                        generation == audioRecordingGeneration &&
+                        !recordingInstalled
+                    ) {
+                        audioRecordingStartInProgress = false
+                    }
                 }
             }
+
             runOnUiThread {
-                result.onSuccess { (preparedRecorder, outFile) ->
-                    mediaRecorder = preparedRecorder
-                    audioTempFile = outFile
-                    setRecordingAudioFromActivity?.invoke(true)
-                    setSystemMessageFromLauncher?.invoke("Gravando audio... Toque novamente para enviar.")
-                }.onFailure {
-                    mediaRecorder = null
-                    audioTempFile = null
-                    setRecordingAudioFromActivity?.invoke(false)
-                    setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
+                val (sameGeneration, stillRecording) = synchronized(audioRecordingLock) {
+                    val currentGeneration = generation == audioRecordingGeneration
+                    val activeRecording =
+                        currentGeneration &&
+                            mediaRecorder != null &&
+                            audioRecordingSessionId == sid
+                    currentGeneration to activeRecording
+                }
+                when {
+                    recordingInstalled && stillRecording -> {
+                        setRecordingAudioFromActivity?.invoke(true)
+                        setSystemMessageFromLauncher?.invoke(
+                            "Gravando audio... Toque novamente para enviar."
+                        )
+                    }
+                    initializationFailed && sameGeneration -> {
+                        setRecordingAudioFromActivity?.invoke(false)
+                        setSystemMessageFromLauncher?.invoke("Falha ao iniciar gravacao de audio.")
+                    }
                 }
             }
         }
@@ -1840,67 +2077,130 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopAudioRecordingAndSend() {
-        val sid = currentSessionId
-        if (sid.isNullOrBlank()) {
-            setRecordingAudioFromActivity?.invoke(false)
+        val recording = synchronized(audioRecordingLock) {
+            if (audioRecordingStartInProgress && mediaRecorder == null) {
+                audioRecordingGeneration += 1
+                audioRecordingStartInProgress = false
+                null
+            } else {
+                val recorder = mediaRecorder
+                val file = audioTempFile
+                val sid = audioRecordingSessionId
+                audioRecordingGeneration += 1
+                mediaRecorder = null
+                audioTempFile = null
+                audioRecordingSessionId = null
+                if (recorder != null && file != null && !sid.isNullOrBlank()) {
+                    Triple(recorder, file, sid)
+                } else {
+                    null
+                }
+            }
+        }
+        setRecordingAudioFromActivity?.invoke(false)
+        if (recording == null) return
+
+        val (recorder, outFile, sid) = recording
+        val stopSucceeded = runCatching {
+            recorder.stop()
+        }.onFailure { error ->
+            Log.w("SXS/Main", "Falha ao finalizar gravacao de audio", error)
+        }.isSuccess
+        releaseMediaRecorderSafely(recorder, stopFirst = false)
+
+        if (!stopSucceeded) {
+            runCatching { outFile.delete() }
+            setSystemMessageFromLauncher?.invoke("Falha ao finalizar gravacao de audio.")
             return
         }
-        val recorder = mediaRecorder ?: return
-        val outFile = audioTempFile
-        mediaRecorder = null
-        setRecordingAudioFromActivity?.invoke(false)
+        if (!outFile.exists()) {
+            setSystemMessageFromLauncher?.invoke("Arquivo de audio nao encontrado.")
+            return
+        }
+        if (currentSessionId != sid) {
+            runCatching { outFile.delete() }
+            return
+        }
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val stopResult = runCatching {
-                recorder.stop()
-                recorder.reset()
-                recorder.release()
-            }
-            if (stopResult.isFailure) {
-                runCatching {
-                    recorder.reset()
-                    recorder.release()
+            try {
+                val result = runCatching {
+                    requireNotNull(Conn.chatRepository) {
+                        "Repositorio de chat indisponivel."
+                    }.sendAudio(
+                        sid,
+                        from = "client",
+                        localUri = Uri.fromFile(outFile)
+                    )
                 }
                 runOnUiThread {
-                    setSystemMessageFromLauncher?.invoke("Falha ao finalizar gravacao de audio.")
+                    if (currentSessionId == sid) {
+                        if (result.isSuccess) {
+                            setSystemMessageFromLauncher?.invoke("Audio enviado.")
+                        } else {
+                            setSystemMessageFromLauncher?.invoke("Falha ao enviar audio.")
+                        }
+                    }
                 }
-                runCatching { outFile?.delete() }
-                audioTempFile = null
-                return@launch
+            } finally {
+                runCatching { outFile.delete() }
             }
+        }
+    }
 
-            val file = outFile
-            if (file == null || !file.exists()) {
-                runOnUiThread {
-                    setSystemMessageFromLauncher?.invoke("Arquivo de audio nao encontrado.")
-                }
-                audioTempFile = null
-                return@launch
-            }
+    private fun releaseMediaRecorderSafely(recorder: MediaRecorder, stopFirst: Boolean) {
+        if (stopFirst) {
+            runCatching { recorder.stop() }
+        }
+        runCatching { recorder.reset() }
+        runCatching { recorder.release() }
+    }
 
-            val result = runCatching {
-                Conn.chatRepository?.sendAudio(sid, from = "client", localUri = Uri.fromFile(file))
-            }
-            runOnUiThread {
-                if (result.isSuccess) {
-                    setSystemMessageFromLauncher?.invoke("Audio enviado.")
-                } else {
-                    setSystemMessageFromLauncher?.invoke("Falha ao enviar audio.")
-                }
-            }
-            runCatching { file.delete() }
+    private fun discardAudioRecording() {
+        val recording = synchronized(audioRecordingLock) {
+            audioRecordingGeneration += 1
+            audioRecordingStartInProgress = false
+            val recorder = mediaRecorder
+            val file = audioTempFile
+            mediaRecorder = null
             audioTempFile = null
+            audioRecordingSessionId = null
+            recorder to file
+        }
+        recording.first?.let { recorder ->
+            releaseMediaRecorderSafely(recorder, stopFirst = true)
+        }
+        runCatching { recording.second?.delete() }
+        setRecordingAudioFromActivity?.invoke(false)
+    }
+
+    private fun toggleAudioRecording() {
+        val shouldStop = synchronized(audioRecordingLock) {
+            mediaRecorder != null || audioRecordingStartInProgress
+        }
+        if (shouldStop) {
+            stopAudioRecordingAndSend()
+        } else {
+            startAudioRecording()
         }
     }
 
     private fun finalizeSession() {
+        discardAudioRecording()
         stopTelemetryLoop()
         voiceCallManager.release()
+        val accessibilityDisableRequested = RemoteExecutor.disableAccessibilityService()
+        if (!accessibilityDisableRequested && isAccessibilityServiceEnabled()) {
+            Log.w(
+                "SXS/Main",
+                "Serviço de Acessibilidade ainda habilitado, mas não conectado para desativação automática"
+            )
+        }
         activeSupportRequestId = null
         stopWaitingSessionRecovery()
         resetSessionState()
         currentSessionId = null
-        remoteConsentAcceptedForCurrentSession = false
+        activeSupportSessionStore.clear()
         Conn.sessionId = null
         Conn.techName = null
         runOnUiThread { setTechNameFromSocket?.invoke("T\u00e9cnico") }
@@ -1943,6 +2243,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun requestClientSessionClosure(sessionId: String, reason: String) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isBlank()) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            repeat(2) { attempt ->
+                val token = runCatching {
+                    authRepository.ensureAnonIdToken(forceRefresh = attempt > 0)
+                }.getOrDefault("")
+                if (token.isBlank()) return@launch
+
+                val payload = JSONObject().apply {
+                    put("reason", reason.take(160))
+                }.toString()
+                val request = Request.Builder()
+                    .url("${Conn.SERVER_BASE}/api/sessions/$normalizedSessionId/client-close")
+                    .post(payload.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull()))
+                    .header("Authorization", "Bearer $token")
+                    .build()
+
+                val status = runCatching {
+                    http.newCall(request).execute().use { response -> response.code }
+                }.getOrNull()
+                if (status != null && status in 200..299) return@launch
+                if (status != 401) {
+                    Log.w("SXS/Main", "Servidor não confirmou encerramento da sessão (status=$status)")
+                    return@launch
+                }
+            }
+        }
+    }
+
     private fun handleSessionEnded(fromCommand: Boolean = true, reason: String? = null) {
         val sid = currentSessionId
         if (sid.isNullOrBlank()) {
@@ -1951,25 +2283,13 @@ class MainActivity : ComponentActivity() {
         }
         val normalizedReason = normalizeSessionEndReason(reason)
         val origin = if (fromCommand) "tech" else "client"
-        if (!fromCommand) sendCommand("end")
+        if (!fromCommand) {
+            sendCommand("end")
+            requestClientSessionClosure(sid, normalizedReason)
+        }
 
         sid?.let {
             logSessionEvent("end", origin = origin, extras = mapOf("reason" to normalizedReason))
-            lifecycleScope.launch(Dispatchers.IO) {
-                runCatching { sessionRepository.markSessionClosed(it) }
-                runCatching {
-                    clientSupportRepository.completeSupportSession(
-                        localSupportSessionId = pendingSupportSessionId,
-                        realtimeSessionId = it,
-                        techId = null,
-                        techName = Conn.techName,
-                        problemSummary = normalizedReason,
-                        solutionSummary = null,
-                        internalNotes = "Encerrado via app Android ($origin)",
-                        reportSummary = normalizedReason
-                    )
-                }
-            }
         }
 
         val shareWasActive = isSharingActive
@@ -1977,7 +2297,10 @@ class MainActivity : ComponentActivity() {
         val callWasActive = callingActive || callConnectedActive
 
         if (callWasActive) {
-            updateCallState(calling = false, connected = false, origin = origin)
+            voiceCallManager.endCall()
+            if (callingActive || callConnectedActive) {
+                updateCallState(calling = false, connected = false, origin = origin)
+            }
         }
         if (remoteWasActive) {
             updateRemoteState(enabled = false, origin = origin)
@@ -1998,7 +2321,6 @@ class MainActivity : ComponentActivity() {
         pendingSupportStartContext = null
         setPendingSupportSession(null)
         stopWaitingSessionRecovery()
-        stopSessionAnchorForegroundService()
         stopIncomingCallAlert()
         cancelIncomingCallNotification(sid)
         finalizeSession()
@@ -2011,19 +2333,38 @@ class MainActivity : ComponentActivity() {
         }
         if (fromCommand && sid.isNotBlank() && !appInForeground) {
             notifySessionEndedByTech(sid, normalizedReason)
-            bringAppToForegroundForFeedback(sid)
         }
     }
 
     // -------- Socket.IO --------
+    private fun emitSessionJoin(sessionId: String, idToken: String = "") {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isBlank() || !::socket.isInitialized) return
+        val joinPayload = JSONObject().apply {
+            put("sessionId", normalizedSessionId)
+            put("role", "client")
+            if (idToken.isNotBlank()) put("idToken", idToken)
+        }
+        socket.emit("session:join", joinPayload)
+        socket.emit("join", joinPayload)
+    }
+
     private fun connectSocket() {
+        if (isAccountIdentityWorkBlocked()) return
         lifecycleScope.launch(Dispatchers.IO) {
+            if (isAccountIdentityWorkBlocked()) return@launch
             val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = true) }.getOrDefault("")
-            runOnUiThread { connectSocketInternal(idToken) }
+            if (isAccountIdentityWorkBlocked()) return@launch
+            runOnUiThread {
+                if (!isAccountIdentityWorkBlocked()) {
+                    connectSocketInternal(idToken)
+                }
+            }
         }
     }
 
     private fun connectSocketInternal(idToken: String) {
+        if (isAccountIdentityWorkBlocked()) return
         val opts = IO.Options().apply {
             forceNew = true
             reconnection = true
@@ -2039,6 +2380,10 @@ class MainActivity : ComponentActivity() {
         Conn.socket = socket
 
         socket.on(Socket.EVENT_CONNECT) {
+            currentSessionId
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { emitSessionJoin(it, idToken) }
             runOnUiThread {
                 // opcional: Toast.makeText(this, "Conectado", Toast.LENGTH_SHORT).show()
             }
@@ -2048,47 +2393,99 @@ class MainActivity : ComponentActivity() {
         socket.on("support:enqueued") { args ->
             val any = args.getOrNull(0) ?: return@on
             val data = (any as? JSONObject) ?: return@on
-            val reqId = data.optString("requestId", "").takeIf { it.isNotBlank() }
-            activeSupportRequestId = reqId
-            syncWaitingSupportForegroundService()
-            startWaitingSessionRecovery()
-            runOnUiThread { setRequestIdFromSocket?.invoke(reqId) }
+            val reqId = data.optString("requestId", "").trim().takeIf { it.isNotBlank() }
+                ?: return@on
+            val eventLocalSupportSessionId = data.optString("localSupportSessionId", "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?: data.optString("supportSessionId", "").trim().takeIf { it.isNotBlank() }
+            val result = supportRequestCorrelation.confirmFromLegacyEvent(
+                eventLocalSupportSessionId = eventLocalSupportSessionId,
+                requestId = reqId
+            )
+            if (result.status == SupportCorrelationStatus.IGNORED) {
+                Log.w("SXS/Main", "support:enqueued atrasado ou sem correlacao ignorado")
+                return@on
+            }
+            publishSupportQueueConfirmation(result)
         }
 
         socket.on("support:error") { args ->
             val data = args.getOrNull(0) as? JSONObject
             val errorCode = data?.optString("error", "")?.trim().orEmpty()
             val backendMessage = data?.optString("message", "")?.trim()?.takeIf { it.isNotBlank() }
-            val feedbackMessage = when (errorCode) {
-                "credit_required" -> "Sem credito disponivel. Compre creditos para solicitar novo atendimento."
-                else -> backendMessage ?: "Nao foi possivel solicitar suporte agora."
+            val eventLocalSupportSessionId = data
+                ?.optString("localSupportSessionId", "")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+            val eventRequestId = data
+                ?.optString("requestId", "")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+            if (
+                !supportRequestCorrelation.canApplyServerError(
+                    eventLocalSupportSessionId = eventLocalSupportSessionId,
+                    eventRequestId = eventRequestId
+                )
+            ) {
+                Log.w("SXS/Main", "support:error atrasado ou sem correlacao ignorado")
+                return@on
             }
-
-            val localSupportId = pendingSupportSessionId
-            activeSupportRequestId = null
-            setPendingSupportSession(null)
-            pendingSupportStartContext = null
-            stopWaitingSessionRecovery()
-            if (!localSupportId.isNullOrBlank()) {
-                lifecycleScope.launch(Dispatchers.IO) {
-                    runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
-                }
-            }
-
-            runOnUiThread {
-                setRequestIdFromSocket?.invoke(null)
-                setSessionIdFromSocket?.invoke(null)
-                setScreenFromSocket?.invoke(Screen.HOME)
-                setSystemMessageFromLauncher?.invoke(feedbackMessage)
-            }
+            val token = supportRequestCorrelation.currentToken() ?: return@on
+            val feedbackMessage = supportRequestFailureMessage(errorCode, backendMessage)
+            supportQueueConfirmationWaiter
+                ?.takeIf { it.token == token }
+                ?.deferred
+                ?.completeExceptionally(
+                    SupportRequestRejectedException(errorCode, feedbackMessage)
+                )
+            failSupportRequest(token, feedbackMessage)
         }
 
         // tecnico aceitou -> recebemos sessionId e (opcional) techName
         socket.on("support:accepted") { args ->
             val data = args.getOrNull(0) as? JSONObject ?: return@on
-            val sid = data.optString("sessionId", "")
+            val sid = data.optString("sessionId", "").trim()
             val tname = data.optString("techName", "Tecnico")
             if (sid.isBlank()) return@on
+            val currentSid = currentSessionId?.trim()
+            if (!currentSid.isNullOrBlank() && currentSid != sid) {
+                Log.w("SXS/Main", "support:accepted atrasado para outra sessao ignorado")
+                return@on
+            }
+            val activeToken = supportRequestCorrelation.currentToken()
+            val expectedLocalSupportSessionId =
+                activeToken?.localSupportSessionId ?: pendingSupportSessionId
+            if (currentSid.isNullOrBlank() && expectedLocalSupportSessionId.isNullOrBlank()) {
+                Log.w("SXS/Main", "support:accepted sem solicitacao ativa ignorado")
+                return@on
+            }
+            val eventLocalSupportSessionId = data
+                .optString("localSupportSessionId", "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+                ?: data.optString("supportSessionId", "").trim().takeIf { it.isNotBlank() }
+            val eventRequestId = data
+                .optString("requestId", "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+            if (
+                eventLocalSupportSessionId != null &&
+                expectedLocalSupportSessionId != null &&
+                eventLocalSupportSessionId != expectedLocalSupportSessionId
+            ) {
+                Log.w("SXS/Main", "support:accepted com sessao local divergente ignorado")
+                return@on
+            }
+            val trackedRequestId = activeSupportRequestId?.trim()?.takeIf { it.isNotBlank() }
+            if (
+                eventRequestId != null &&
+                trackedRequestId != null &&
+                eventRequestId != trackedRequestId
+            ) {
+                Log.w("SXS/Main", "support:accepted com requestId divergente ignorado")
+                return@on
+            }
             handleSupportAccepted(sessionId = sid, techName = tname, source = "socket")
         }
 
@@ -2189,9 +2586,266 @@ class MainActivity : ComponentActivity() {
         return socket.connected()
     }
 
+    private fun parseSupportRequestAck(args: Array<out Any?>): SupportRequestAck {
+        val data = args.getOrNull(0) as? JSONObject
+        if (data == null) {
+            return SupportRequestAck(
+                ok = false,
+                requestId = null,
+                reused = false,
+                error = "invalid_ack",
+                message = null,
+                localSupportSessionId = null
+            )
+        }
+        return SupportRequestAck(
+            ok = data.optBoolean("ok", false),
+            requestId = data.optString("requestId", "").trim().takeIf { it.isNotBlank() },
+            reused = data.optBoolean("reused", false),
+            error = data.optString("error", "").trim().takeIf { it.isNotBlank() }
+                ?: data.optString("err", "").trim().takeIf { it.isNotBlank() },
+            message = data.optString("message", "").trim().takeIf { it.isNotBlank() },
+            localSupportSessionId = data.optString("localSupportSessionId", "")
+                .trim()
+                .takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun publishSupportQueueConfirmation(
+        result: SupportCorrelationResult
+    ): SupportQueueConfirmation? {
+        if (result.status == SupportCorrelationStatus.IGNORED) return null
+        val confirmation = result.confirmation ?: return null
+        val waiter = supportQueueConfirmationWaiter
+        if (waiter?.token == confirmation.token) {
+            waiter.deferred.complete(confirmation)
+        }
+        runOnUiThread {
+            if (!supportRequestCorrelation.isActive(confirmation.token)) return@runOnUiThread
+            activeSupportRequestId = confirmation.requestId
+            syncWaitingSupportForegroundService()
+            startWaitingSessionRecovery()
+            setRequestIdFromSocket?.invoke(confirmation.requestId)
+        }
+        return confirmation
+    }
+
+    private fun supportRequestFailureMessage(errorCode: String?, backendMessage: String?): String {
+        return when (errorCode) {
+            "credit_required" ->
+                "Sem crédito disponível. Compre créditos para solicitar novo atendimento."
+            "unauthorized", "auth_required", "invalid_token" ->
+                "Não foi possível confirmar sua autenticação. Tente novamente."
+            "invalid_ack" ->
+                "O servidor respondeu de forma inesperada. Tente solicitar novamente."
+            else -> backendMessage?.takeIf { it.isNotBlank() }
+                ?: "Não foi possível entrar na fila agora. Tente novamente em alguns segundos."
+        }
+    }
+
+    private fun failSupportRequest(
+        token: SupportRequestToken,
+        message: String,
+        cancelLocalSession: Boolean = true
+    ) {
+        if (!supportRequestCorrelation.finish(token)) return
+        val waiter = supportQueueConfirmationWaiter
+        if (waiter?.token == token) {
+            supportQueueConfirmationWaiter = null
+            waiter.deferred.completeExceptionally(
+                SupportRequestRejectedException(errorCode = null, message = message)
+            )
+        }
+        if (cancelLocalSession) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching {
+                    if (::socket.isInitialized && socket.connected()) {
+                        socket.emit(
+                            "support:cancel",
+                            JSONObject().apply {
+                                put(
+                                    "localSupportSessionId",
+                                    token.localSupportSessionId
+                                )
+                            }
+                        )
+                    }
+                }.onFailure { error ->
+                    Log.w(
+                        "SXS/Main",
+                        "Falha ao cancelar fila remota após solicitação não confirmada",
+                        error
+                    )
+                }
+                runCatching {
+                    clientSupportRepository.cancelSupportRequest(token.localSupportSessionId)
+                }
+            }
+        }
+        runOnUiThread {
+            if (pendingSupportSessionId != token.localSupportSessionId) return@runOnUiThread
+            activeSupportRequestId = null
+            setPendingSupportSession(null)
+            pendingSupportStartContext = null
+            stopWaitingSessionRecovery()
+            setRequestIdFromSocket?.invoke(null)
+            setSessionIdFromSocket?.invoke(null)
+            setScreenFromSocket?.invoke(Screen.HOME)
+            setSystemMessageFromLauncher?.invoke(message)
+        }
+    }
+
+    private fun invalidateSupportRequestTracking(cancelJob: Boolean) {
+        supportRequestCorrelation.invalidate()
+        supportQueueConfirmationWaiter?.deferred?.cancel()
+        supportQueueConfirmationWaiter = null
+        if (cancelJob) {
+            supportRequestJob?.cancel()
+            supportRequestJob = null
+        }
+    }
+
+    private fun finishSupportRequestTracking(localSupportSessionId: String?) {
+        val token = supportRequestCorrelation.currentToken() ?: return
+        if (
+            !localSupportSessionId.isNullOrBlank() &&
+            token.localSupportSessionId != localSupportSessionId
+        ) {
+            return
+        }
+        supportQueueConfirmationWaiter
+            ?.takeIf { it.token == token }
+            ?.deferred
+            ?.complete(
+                SupportQueueConfirmation(
+                    token = token,
+                    requestId = activeSupportRequestId ?: token.localSupportSessionId,
+                    source = SupportQueueConfirmationSource.LEGACY_EVENT,
+                    reused = true
+                )
+            )
+        supportRequestCorrelation.finish(token)
+        if (supportQueueConfirmationWaiter?.token == token) {
+            supportQueueConfirmationWaiter = null
+        }
+    }
+
+    private suspend fun emitSupportRequestWithConfirmation(
+        token: SupportRequestToken,
+        payload: JSONObject,
+        confirmationDeferred: CompletableDeferred<SupportQueueConfirmation>
+    ): SupportQueueConfirmation {
+        repeat(SUPPORT_REQUEST_MAX_ATTEMPTS) { attemptIndex ->
+            if (confirmationDeferred.isCompleted) {
+                return confirmationDeferred.await()
+            }
+            if (!supportRequestCorrelation.isActive(token)) {
+                throw SupportRequestRejectedException(
+                    errorCode = "request_superseded",
+                    message = "Solicitação substituída por uma tentativa mais recente."
+                )
+            }
+
+            val ackDeferred = CompletableDeferred<SupportRequestAck>()
+            val emitted = runCatching {
+                socket.emit(
+                    "support:request",
+                    arrayOf<Any>(payload),
+                    Ack { args -> ackDeferred.complete(parseSupportRequestAck(args)) }
+                )
+            }.onFailure { error ->
+                Log.w(
+                    "SXS/Main",
+                    "Falha ao emitir support:request tentativa=${attemptIndex + 1}",
+                    error
+                )
+            }.isSuccess
+
+            val attemptResult = if (emitted) {
+                withTimeoutOrNull<SupportRequestAttemptResult>(SUPPORT_REQUEST_ACK_TIMEOUT_MS) {
+                    select {
+                        ackDeferred.onAwait { SupportRequestAttemptResult.AckReceived(it) }
+                        confirmationDeferred.onAwait {
+                            SupportRequestAttemptResult.QueueConfirmed(it)
+                        }
+                    }
+                }
+            } else {
+                null
+            }
+
+            when (attemptResult) {
+                is SupportRequestAttemptResult.QueueConfirmed -> {
+                    return attemptResult.confirmation
+                }
+                is SupportRequestAttemptResult.AckReceived -> {
+                    val ack = attemptResult.ack
+                    if (!ack.ok) {
+                        val retryMalformedAck =
+                            ack.error == "invalid_ack" &&
+                                attemptIndex + 1 < SUPPORT_REQUEST_MAX_ATTEMPTS
+                        if (!retryMalformedAck) {
+                            throw SupportRequestRejectedException(
+                                errorCode = ack.error,
+                                message = supportRequestFailureMessage(ack.error, ack.message)
+                            )
+                        }
+                    } else {
+                        val requestId = ack.requestId
+                        if (requestId.isNullOrBlank()) {
+                            if (attemptIndex + 1 >= SUPPORT_REQUEST_MAX_ATTEMPTS) {
+                                throw SupportRequestRejectedException(
+                                    errorCode = "invalid_ack",
+                                    message = supportRequestFailureMessage("invalid_ack", null)
+                                )
+                            }
+                        } else {
+                            val confirmation = publishSupportQueueConfirmation(
+                                supportRequestCorrelation.confirmFromAck(
+                                    token = token,
+                                    ackLocalSupportSessionId = ack.localSupportSessionId,
+                                    requestId = requestId,
+                                    reused = ack.reused
+                                )
+                            )
+                            if (confirmation != null) return confirmation
+                            if (!supportRequestCorrelation.isActive(token)) {
+                                throw SupportRequestRejectedException(
+                                    errorCode = "request_superseded",
+                                    message = "Solicitação substituída por uma tentativa mais recente."
+                                )
+                            }
+                        }
+                    }
+                }
+                null -> {
+                    if (confirmationDeferred.isCompleted) {
+                        return confirmationDeferred.await()
+                    }
+                }
+            }
+
+            if (attemptIndex + 1 < SUPPORT_REQUEST_MAX_ATTEMPTS) {
+                ensureSupportSocketReady()
+            }
+        }
+
+        val legacyConfirmation = withTimeoutOrNull(SUPPORT_REQUEST_LEGACY_GRACE_MS) {
+            confirmationDeferred.await()
+        }
+        if (legacyConfirmation != null) return legacyConfirmation
+        throw SupportRequestRejectedException(
+            errorCode = "ack_timeout",
+            message = "O servidor não confirmou a entrada na fila. Tente solicitar novamente."
+        )
+    }
+
     private fun loadHomeSnapshot(onResult: (ClientHomeSnapshot) -> Unit) {
+        if (isAccountIdentityWorkBlocked()) return
         lifecycleScope.launch(Dispatchers.IO) {
+            if (isAccountIdentityWorkBlocked()) return@launch
             val clientUid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+            if (isAccountIdentityWorkBlocked()) return@launch
             val firebasePhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
             val snapshot = runCatching {
                 clientSupportRepository.seedDefaultPackagesIfNeeded()
@@ -2216,13 +2870,20 @@ class MainActivity : ComponentActivity() {
             if (!verifiedPhone.isNullOrBlank()) {
                 runCatching { phoneIdentityProvider.saveVerifiedPhoneNumber(verifiedPhone) }
             }
-            runOnUiThread { onResult(snapshot) }
+            runOnUiThread {
+                if (!isAccountIdentityWorkBlocked()) {
+                    onResult(snapshot)
+                }
+            }
         }
     }
 
     private fun evaluateSupportEntry(onDecision: (SupportAccessDecision) -> Unit) {
+        if (isAccountIdentityWorkBlocked()) return
         lifecycleScope.launch(Dispatchers.IO) {
+            if (isAccountIdentityWorkBlocked()) return@launch
             val clientUid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
+            if (isAccountIdentityWorkBlocked()) return@launch
             val firebasePhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
             val decision = runCatching {
                 clientSupportRepository.seedDefaultPackagesIfNeeded()
@@ -2238,7 +2899,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
             pendingSupportStartContext = (decision as? SupportAccessDecision.Allowed)?.startContext
-            runOnUiThread { onDecision(decision) }
+            runOnUiThread {
+                if (!isAccountIdentityWorkBlocked()) {
+                    onDecision(decision)
+                }
+            }
         }
     }
 
@@ -2246,25 +2911,35 @@ class MainActivity : ComponentActivity() {
         startContext: SupportStartContext,
         clientName: String?
     ) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            activeSupportRequestId = null
-            setPendingSupportSession(null)
-            stopWaitingSessionRecovery()
-            val uid = runCatching { authRepository.ensureAnonAuth() }.getOrNull()
-            val idToken = runCatching { authRepository.ensureAnonIdToken(forceRefresh = false) }.getOrDefault("")
-            val verifiedPhone = runCatching { phoneIdentityProvider.getVerifiedPhoneNumber() }.getOrNull()
+        invalidateSupportRequestTracking(cancelJob = true)
+        activeSupportRequestId = null
+        setPendingSupportSession(null)
+        stopWaitingSessionRecovery()
+
+        val requestJob = lifecycleScope.launch(Dispatchers.IO) {
+            val uid = runCatchingUnlessCancelled { authRepository.ensureAnonAuth() }.getOrNull()
+            val idToken = runCatchingUnlessCancelled {
+                authRepository.ensureAnonIdToken(forceRefresh = false)
+            }.getOrDefault("")
+            val verifiedPhone = runCatchingUnlessCancelled {
+                phoneIdentityProvider.getVerifiedPhoneNumber()
+            }.getOrNull()
             val effectivePhone = verifiedPhone ?: startContext.phone
             val currentDeviceAnchor = deviceAnchor()
+            currentCoroutineContext().ensureActive()
             if (uid.isNullOrBlank()) {
                 Log.e("SXS/Main", "Falha ao autenticar cliente antes de support:request")
                 runOnUiThread {
+                    pendingSupportStartContext = null
                     setScreenFromSocket?.invoke(Screen.HOME)
-                    setSystemMessageFromLauncher?.invoke("Falha de autenticacao. Tente novamente em alguns segundos.")
+                    setSystemMessageFromLauncher?.invoke(
+                        "Falha de autenticação. Tente novamente em alguns segundos."
+                    )
                 }
                 return@launch
             }
 
-            val localSupportSessionId = runCatching {
+            val localSupportSessionResult = runCatchingUnlessCancelled {
                 clientSupportRepository.registerSupportRequest(
                     startContext = startContext.copy(phone = effectivePhone),
                     clientName = clientName,
@@ -2274,15 +2949,77 @@ class MainActivity : ComponentActivity() {
                     deviceModel = Build.MODEL,
                     androidVersion = Build.VERSION.RELEASE ?: Build.VERSION.SDK_INT.toString()
                 )
-            }.getOrNull()
-            setPendingSupportSession(localSupportSessionId)
-            startWaitingSessionRecovery()
+            }
+            val localSupportSessionId = localSupportSessionResult
+                .getOrNull()
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+            if (localSupportSessionId == null) {
+                localSupportSessionResult.exceptionOrNull()?.let { error ->
+                    Log.e("SXS/Main", "Falha ao registrar solicitacao local de suporte", error)
+                }
+                runOnUiThread {
+                    activeSupportRequestId = null
+                    setPendingSupportSession(null)
+                    pendingSupportStartContext = null
+                    stopWaitingSessionRecovery()
+                    setRequestIdFromSocket?.invoke(null)
+                    setScreenFromSocket?.invoke(Screen.HOME)
+                    setSystemMessageFromLauncher?.invoke(
+                        "Não foi possível preparar sua solicitação. Verifique a conexão e tente novamente."
+                    )
+                }
+                return@launch
+            }
+            try {
+                currentCoroutineContext().ensureActive()
+            } catch (error: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching {
+                        clientSupportRepository.cancelSupportRequest(localSupportSessionId)
+                    }
+                }
+                throw error
+            }
+
+            val token = supportRequestCorrelation.begin(localSupportSessionId)
+            val confirmationDeferred = CompletableDeferred<SupportQueueConfirmation>()
+            supportQueueConfirmationWaiter = SupportQueueConfirmationWaiter(
+                token = token,
+                deferred = confirmationDeferred
+            )
+            try {
+                withContext(Dispatchers.Main) {
+                    if (!supportRequestCorrelation.isActive(token)) return@withContext
+                    setPendingSupportSession(localSupportSessionId)
+                    startWaitingSessionRecovery()
+                }
+            } catch (error: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching {
+                        clientSupportRepository.cancelSupportRequest(localSupportSessionId)
+                    }
+                }
+                throw error
+            }
+            if (!supportRequestCorrelation.isActive(token)) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching {
+                        clientSupportRepository.cancelSupportRequest(localSupportSessionId)
+                    }
+                }
+                return@launch
+            }
+
             warmUpBackendForSupportBlocking()
+            currentCoroutineContext().ensureActive()
             val socketReady = ensureSupportSocketReady()
             if (!socketReady) {
-                runOnUiThread {
-                    setSystemMessageFromLauncher?.invoke("Servidor conectando. Se nao aparecer na fila, toque em solicitar novamente em alguns segundos.")
-                }
+                failSupportRequest(
+                    token = token,
+                    message = "Não foi possível conectar ao servidor. Tente solicitar novamente."
+                )
+                return@launch
             }
 
             val payload = JSONObject().apply {
@@ -2299,37 +3036,71 @@ class MainActivity : ComponentActivity() {
                 put("clientUid", uid)
                 put("uid", uid)
                 put("deviceAnchor", currentDeviceAnchor)
+                put("localSupportSessionId", localSupportSessionId)
                 put("supportProfile", JSONObject().apply {
                     put("isNewClient", startContext.isNewClient)
                     put("isFreeFirstSupport", startContext.isFreeFirstSupport)
                     put("creditsToConsume", startContext.creditsToConsume)
-                    put("localSupportSessionId", pendingSupportSessionId)
+                    put("localSupportSessionId", localSupportSessionId)
                     put("disableQuickIdentificationModal", supportFlowFlags.disableQuickIdentificationModal)
                     put("technicianDrivenRegistrationEnabled", supportFlowFlags.technicianDrivenRegistrationEnabled)
                     put("pnvPostRegistrationFlow", supportFlowFlags.pnvPostRegistrationFlow)
                 })
                 if (idToken.isNotBlank()) put("idToken", idToken)
             }
-            socket.emit("support:request", payload)
+
+            try {
+                emitSupportRequestWithConfirmation(
+                    token = token,
+                    payload = payload,
+                    confirmationDeferred = confirmationDeferred
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: SupportRequestRejectedException) {
+                if (error.errorCode != "request_superseded") {
+                    failSupportRequest(token, error.message)
+                }
+                return@launch
+            } catch (error: Exception) {
+                Log.e("SXS/Main", "Falha ao confirmar entrada na fila", error)
+                failSupportRequest(
+                    token = token,
+                    message = "Não foi possível confirmar sua entrada na fila. Tente novamente."
+                )
+                return@launch
+            } finally {
+                if (supportQueueConfirmationWaiter?.token == token) {
+                    supportQueueConfirmationWaiter = null
+                }
+            }
 
             if (!verifiedPhone.isNullOrBlank()) {
                 runCatching {
-                        clientSupportRepository.registerPnvSuccess(
-                            clientUid = uid,
-                            verifiedPhone = verifiedPhone,
-                            token = null,
-                            localSupportSessionId = pendingSupportSessionId,
-                            deviceAnchor = currentDeviceAnchor,
-                            clientId = startContext.clientId
-                        )
+                    clientSupportRepository.registerPnvSuccess(
+                        clientUid = uid,
+                        verifiedPhone = verifiedPhone,
+                        token = null,
+                        localSupportSessionId = localSupportSessionId,
+                        deviceAnchor = currentDeviceAnchor,
+                        clientId = startContext.clientId
+                    )
                 }
             } else {
                 runOnUiThread {
                     launchPnvVerificationFlow(
                         clientUid = uid,
                         startContext = startContext,
-                        localSupportSessionId = pendingSupportSessionId
+                        localSupportSessionId = localSupportSessionId
                     )
+                }
+            }
+        }
+        supportRequestJob = requestJob
+        requestJob.invokeOnCompletion {
+            runOnUiThread {
+                if (supportRequestJob === requestJob) {
+                    supportRequestJob = null
                 }
             }
         }
@@ -2398,6 +3169,7 @@ class MainActivity : ComponentActivity() {
     // Cancelar (opcional) pelo endpoint HTTP do servidor
     private fun cancelRequest(requestId: String, onDone: () -> Unit = {}) {
         val localSupportId = pendingSupportSessionId
+        invalidateSupportRequestTracking(cancelJob = true)
         if (!localSupportId.isNullOrBlank()) {
             lifecycleScope.launch(Dispatchers.IO) {
                 runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
@@ -2413,6 +3185,9 @@ class MainActivity : ComponentActivity() {
                 if (::socket.isInitialized) {
                     socket.emit("support:cancel", JSONObject().apply {
                         put("requestId", requestId)
+                        localSupportId
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { put("localSupportSessionId", it) }
                     })
                 }
             }
@@ -2447,7 +3222,7 @@ class MainActivity : ComponentActivity() {
             updateSharingState(active = false, origin = "system")
         }
         shareRequestFromCommand = fromCommand
-        ensureRemoteAccessConsent {
+        ensureScreenSharingConsent {
             setSystemMessageFromLauncher?.invoke("Preparando compartilhamento...")
             lifecycleScope.launch(Dispatchers.IO) {
                 val ready = ensureRealtimeSessionReady(sid, reason = "screen_share_start")
@@ -2736,14 +3511,6 @@ class MainActivity : ComponentActivity() {
             }
     }
 
-    private fun requestGooglePlayReviewOrOpenStore() {
-        googlePlayReviewPrompt.requestReview(this) { launched ->
-            if (!launched) {
-                openPlayStoreListing()
-            }
-        }
-    }
-
     private fun shareAppListing() {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -2766,9 +3533,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun registerNotificationTokenForClient(clientId: String?) {
+        if (isAccountIdentityWorkBlocked()) return
         FirebaseMessaging.getInstance().token
             .addOnSuccessListener { token ->
+                if (isAccountIdentityWorkBlocked()) return@addOnSuccessListener
                 lifecycleScope.launch(Dispatchers.IO) {
+                    if (isAccountIdentityWorkBlocked()) return@launch
                     runCatching {
                         clientNotificationRepository.registerDevice(
                             context = applicationContext,
@@ -2865,6 +3635,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        accountDeletionRestartPending =
+            savedInstanceState?.getBoolean(KEY_ACCOUNT_DELETION_RESTART_PENDING) == true
+        FirebaseAuth.getInstance().addAuthStateListener(accountDeletionAuthStateListener)
+        registerWaitingCancellationReceiver()
         handleLaunchIntent(intent)
         val appBackgroundArgb = Color(0xFFF4F6F8).toArgb()
         configureSystemBars(appBackgroundArgb)
@@ -2873,8 +3647,12 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = true
         }
 
-        lifecycleScope.launch(Dispatchers.IO) {
-            runCatching { clientSupportRepository.seedDefaultPackagesIfNeeded() }
+        if (!isAccountIdentityWorkBlocked()) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                if (!isAccountIdentityWorkBlocked()) {
+                    runCatching { clientSupportRepository.seedDefaultPackagesIfNeeded() }
+                }
+            }
         }
         mediaProjectionManager = getSystemService(MediaProjectionManager::class.java)
         appUpdateManager = AppUpdateManagerFactory.create(this)
@@ -2887,6 +3665,7 @@ class MainActivity : ComponentActivity() {
 
         connectSocket() // conecta o Socket.IO assim que abrir o app
         readPendingSupportSessionFromPrefs()?.let { localSupportSessionId ->
+            supportRequestCorrelation.begin(localSupportSessionId)
             setPendingSupportSession(localSupportSessionId)
             startWaitingSessionRecovery()
         }
@@ -2953,12 +3732,21 @@ class MainActivity : ComponentActivity() {
                 var bootstrapCycle by remember { mutableIntStateOf(0) }
                 var hasHandledFirstOnStart by remember { mutableStateOf(false) }
                 var skipInitialHomeRefresh by remember { mutableStateOf(true) }
+                var showAccountDeletionDialog by remember { mutableStateOf(false) }
+                var accountDeletionConfirmation by remember { mutableStateOf("") }
+                var accountDeletionInProgress by remember { mutableStateOf(false) }
+                var accountDeletionFeedback by remember { mutableStateOf<String?>(null) }
+                var accountDeletedAwaitingRestart by rememberSaveable {
+                    mutableStateOf(accountDeletionRestartPending)
+                }
                 val lifecycleOwner = LocalLifecycleOwner.current
                 val currentScreen by rememberUpdatedState(current)
+                val accountDeletedAwaitingRestartState by rememberUpdatedState(
+                    accountDeletedAwaitingRestart
+                )
                 val homeAverageWaitLabel = formatHomeAverageWaitLabel(supportQueueWaitStats)
                 val waitingAverageWaitLabel = formatWaitingAverageWaitLabel(supportQueueWaitStats)
                 var notificationCenterUiState by remember { mutableStateOf(NotificationCenterUiState.Empty) }
-                var notificationCenterOpenSignal by remember { mutableIntStateOf(0) }
 
                 fun finishStartupLoadingIfReady() {
                     if (showStartupLoading &&
@@ -3000,6 +3788,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 fun startBootstrap(showAnimation: Boolean) {
+                    if (isAccountIdentityWorkBlocked() || accountDeletedAwaitingRestart) return
                     val cycle = bootstrapCycle + 1
                     bootstrapCycle = cycle
                     bootstrapHomeLoaded = false
@@ -3011,7 +3800,13 @@ class MainActivity : ComponentActivity() {
                     }
 
                     loadHomeSnapshot { snapshot ->
-                        if (cycle != bootstrapCycle) return@loadHomeSnapshot
+                        if (
+                            isAccountIdentityWorkBlocked() ||
+                            accountDeletedAwaitingRestart ||
+                            cycle != bootstrapCycle
+                        ) {
+                            return@loadHomeSnapshot
+                        }
                         homeSnapshot = mergeSnapshotWithSupportDecision(
                             snapshot = snapshot,
                             decision = preloadedSupportDecision
@@ -3024,14 +3819,26 @@ class MainActivity : ComponentActivity() {
                     }
 
                     loadSupportQueueWaitStats { stats ->
-                        if (cycle != bootstrapCycle) return@loadSupportQueueWaitStats
+                        if (
+                            isAccountIdentityWorkBlocked() ||
+                            accountDeletedAwaitingRestart ||
+                            cycle != bootstrapCycle
+                        ) {
+                            return@loadSupportQueueWaitStats
+                        }
                         supportQueueWaitStats = stats
                         bootstrapQueueLoaded = true
                         finishStartupLoadingIfReady()
                     }
 
                     evaluateSupportEntry { decision ->
-                        if (cycle != bootstrapCycle) return@evaluateSupportEntry
+                        if (
+                            isAccountIdentityWorkBlocked() ||
+                            accountDeletedAwaitingRestart ||
+                            cycle != bootstrapCycle
+                        ) {
+                            return@evaluateSupportEntry
+                        }
                         preloadedSupportDecision = decision
                         syncHomeWithSupportDecision(decision)
                         bootstrapAccessLoaded = true
@@ -3115,15 +3922,17 @@ class MainActivity : ComponentActivity() {
                             }
                             current = Screen.PURCHASE_CREDITS
                         }
-                        "OPEN_PLAY_STORE" -> {
-                            if (notification.type == ClientNotificationType.REVIEW) {
-                                requestGooglePlayReviewOrOpenStore()
-                            } else {
-                                openPlayStoreListing()
-                            }
+                        "OPEN_PLAY_STORE",
+                        "REVIEW",
+                        "REVIEW_APP" -> {
+                            openPlayStoreListing()
                         }
                         "OPEN_SHARE_SHEET" -> shareAppListing()
-                        "OPEN_SECURITY_SETTINGS" -> openAccessibilitySettings()
+                        "OPEN_SECURITY_SETTINGS" -> {
+                            showAccessibilityDisclosure(grantForCurrentSession = false) {
+                                openAccessibilitySettings()
+                            }
+                        }
                         "OPEN_PERMISSIONS" -> openAppPermissionSettings()
                         "DISMISS" -> dismissClientNotification(notification)
                         "MARK_AS_READ",
@@ -3134,7 +3943,203 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                fun accountDeletionLocalBlockMessage(): String? {
+                    val hasActiveSession =
+                        !currentSessionId.isNullOrBlank() ||
+                            !sessionId.isNullOrBlank() ||
+                            current == Screen.SESSION
+                    if (hasActiveSession) {
+                        return "Encerre o atendimento atual antes de excluir sua conta."
+                    }
+
+                    val hasWaitingRequest =
+                        !pendingSupportSessionId.isNullOrBlank() ||
+                            !activeSupportRequestId.isNullOrBlank() ||
+                            !requestId.isNullOrBlank() ||
+                            supportRequestCorrelation.currentToken() != null ||
+                            current == Screen.WAITING
+                    if (hasWaitingRequest) {
+                        return "Cancele a solicitação de suporte em espera antes de excluir sua conta."
+                    }
+                    return null
+                }
+
+                fun openAccountDeletionConfirmation() {
+                    accountDeletionConfirmation = ""
+                    accountDeletionFeedback = accountDeletionLocalBlockMessage()
+                    showAccountDeletionDialog = true
+                }
+
+                fun confirmAccountDeletion() {
+                    if (accountDeletionInProgress) return
+
+                    val localBlockMessage = accountDeletionLocalBlockMessage()
+                    if (localBlockMessage != null) {
+                        accountDeletionFeedback = localBlockMessage
+                        return
+                    }
+                    if (accountDeletionConfirmation != ACCOUNT_DELETION_CONFIRMATION) {
+                        accountDeletionFeedback =
+                            "Digite exatamente $ACCOUNT_DELETION_CONFIRMATION para confirmar."
+                        return
+                    }
+
+                    accountDeletionInProgress = true
+                    accountDeletionFeedback = null
+                    accountDeletionOperationInProgress = true
+                    val idempotencyKey = UUID.randomUUID().toString()
+
+                    lifecycleScope.launch {
+                        try {
+                            var result = accountDeletionRepository.deleteAccount(
+                                idempotencyKey = idempotencyKey
+                            )
+
+                            if (result == AccountDeletionResult.PnvRequired) {
+                                val supportInfo = runCatching {
+                                    phoneIdentityProvider.checkPnvSupport()
+                                }.getOrNull()
+                                if (supportInfo?.hasSupportedSim != true) {
+                                    accountDeletionFeedback =
+                                        "A verificação automática exigida para excluir a conta não está disponível neste aparelho ou operadora. Use o canal oficial informado nesta tela."
+                                    return@launch
+                                }
+
+                                when (
+                                    val verification =
+                                        phoneIdentityProvider.verifyWithPnv(this@MainActivity)
+                                ) {
+                                    is PhonePnvVerificationResult.Success -> {
+                                        result = accountDeletionRepository.deleteAccount(
+                                            idempotencyKey = idempotencyKey,
+                                            pnvPhone = verification.phoneNumber,
+                                            pnvToken = verification.token
+                                        )
+                                    }
+
+                                    is PhonePnvVerificationResult.Failure -> {
+                                        accountDeletionFeedback = if (verification.userCancelled) {
+                                            "Verificação cancelada. Nenhum dado foi excluído."
+                                        } else {
+                                            "Não foi possível confirmar o número agora. Nenhum dado foi excluído; tente novamente."
+                                        }
+                                        return@launch
+                                    }
+                                }
+                            }
+
+                            when (val finalResult = result) {
+                                is AccountDeletionResult.Success -> {
+                                    accountDeletionRestartPending = true
+                                    accountDeletedAwaitingRestart = true
+                                    bootstrapCycle += 1
+                                    runCatching { clearLocalStateAfterAccountDeletion() }
+
+                                    requestId = null
+                                    sessionId = null
+                                    isSharing = false
+                                    remoteEnabled = false
+                                    calling = false
+                                    callConnected = false
+                                    callState = CallState.IDLE
+                                    callDirection = null
+                                    techName = "T\u00e9cnico"
+                                    systemMessage = null
+                                    isRecordingAudio = false
+                                    endedSessionId = null
+                                    homeSnapshot = ClientHomeSnapshot(
+                                        clientUid = null,
+                                        phone = null,
+                                        client = null,
+                                        clientMeta = null,
+                                        verification = null,
+                                        packages = SupportBillingConfig.defaultCreditPackages
+                                    )
+                                    supportQueueWaitStats = null
+                                    selectedPackage = null
+                                    autoOpenedPurchaseClientId = null
+                                    preloadedSupportDecision = null
+                                    notificationCenterUiState = NotificationCenterUiState.Empty
+                                    accountDeletionConfirmation = ""
+                                    accountDeletionFeedback = null
+                                    showAccountDeletionDialog = false
+                                }
+
+                                AccountDeletionResult.InvalidPnv -> {
+                                    accountDeletionFeedback =
+                                        "A verificação do número expirou ou não foi aceita. Nenhum dado foi excluído; tente novamente."
+                                }
+
+                                AccountDeletionResult.ActiveSupport -> {
+                                    accountDeletionFeedback =
+                                        "Encerre o atendimento atual antes de excluir sua conta."
+                                }
+
+                                AccountDeletionResult.InProgress -> {
+                                    accountDeletionFeedback =
+                                        "A exclusão desta conta já está sendo processada. Aguarde e tente novamente."
+                                }
+
+                                AccountDeletionResult.PnvRequired -> {
+                                    accountDeletionFeedback =
+                                        "Não foi possível validar o número para excluir a conta. Tente novamente."
+                                }
+
+                                is AccountDeletionResult.RecoverableFailure -> {
+                                    accountDeletionFeedback = when (finalResult.reason) {
+                                        AccountDeletionFailureReason.AUTHENTICATION ->
+                                            "Não foi possível confirmar sua sessão. Feche e abra o app antes de tentar novamente."
+
+                                        AccountDeletionFailureReason.RATE_LIMITED ->
+                                            "Foram feitas muitas tentativas. Aguarde alguns minutos e tente novamente."
+
+                                        AccountDeletionFailureReason.TRANSPORT,
+                                        AccountDeletionFailureReason.TRANSIENT_HTTP ->
+                                            "Não foi possível concluir agora. Verifique sua conexão e tente novamente."
+
+                                        AccountDeletionFailureReason.INVALID_REQUEST,
+                                        AccountDeletionFailureReason.INVALID_RESPONSE,
+                                        AccountDeletionFailureReason.SERVER_REJECTED ->
+                                            "Não foi possível excluir a conta agora. Nenhum dado foi alterado; tente novamente mais tarde."
+                                    }
+                                }
+                            }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            accountDeletionFeedback =
+                                "Não foi possível excluir a conta agora. Nenhum dado foi alterado; tente novamente mais tarde."
+                        } finally {
+                            accountDeletionInProgress = false
+                            accountDeletionOperationInProgress = false
+                        }
+                    }
+                }
+
+                fun restartAfterAccountDeletion() {
+                    if (!accountDeletedAwaitingRestart) return
+
+                    pendingLaunchSessionFromNotification = null
+                    pendingLaunchFeedbackSessionId = null
+                    pendingLaunchAcceptedSessionId = null
+                    pendingLaunchAcceptedTechName = null
+                    pendingLaunchAcceptedLocalSupportSessionId = null
+                    accountDeletionRestartPending = false
+                    accountDeletedAwaitingRestart = false
+                    showAccountDeletionDialog = false
+                    accountDeletionConfirmation = ""
+                    accountDeletionFeedback = null
+                    preloadedSupportDecision = null
+                    skipInitialHomeRefresh = true
+                    current = Screen.HOME
+                    startBootstrap(showAnimation = true)
+                    connectSocket()
+                }
+
                 BackHandler {
+                    if (accountDeletionInProgress || accountDeletedAwaitingRestart) {
+                        return@BackHandler
+                    }
                     when (current) {
                         Screen.HELP -> current = Screen.HOME
                         Screen.PRIVACY -> current = Screen.HOME
@@ -3148,6 +4153,7 @@ class MainActivity : ComponentActivity() {
                                 cancelRequest(activeRequestId)
                             } else {
                                 val localSupportId = pendingSupportSessionId
+                                invalidateSupportRequestTracking(cancelJob = true)
                                 if (!localSupportId.isNullOrBlank()) {
                                     lifecycleScope.launch(Dispatchers.IO) {
                                         runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
@@ -3171,52 +4177,102 @@ class MainActivity : ComponentActivity() {
 
                 // Bridges Activity -> Compose
                 LaunchedEffect(Unit) {
-                    setIsSharingFromLauncher = { isSharing = it }
-                    setSystemMessageFromLauncher = { msg -> systemMessage = msg }
-                    requestOpenClientNotificationCenterFromLauncher = {
-                        notificationCenterOpenSignal += 1
+                    setIsSharingFromLauncher = {
+                        if (!isAccountIdentityWorkBlocked()) isSharing = it
                     }
-
+                    setSystemMessageFromLauncher = { msg ->
+                        if (!isAccountIdentityWorkBlocked()) systemMessage = msg
+                    }
                     // Bridges Socket -> Compose
-                    setRequestIdFromSocket = { req -> requestId = req }
-                    setSessionIdFromSocket = { sid ->
-                        sessionId = sid
-                        currentSessionId = sid
-                        voiceCallManager.bindSession(sid)
+                    setRequestIdFromSocket = { req ->
+                        if (!isAccountIdentityWorkBlocked()) requestId = req
                     }
-                    setScreenFromSocket = { scr -> current = scr }
-                    setRemoteEnabledFromSocket = { remoteEnabled = it }
-                    setCallingFromSocket = { calling = it }
-                    setCallConnectedFromSocket = { callConnected = it }
-                    setCallStateFromManager = { callState = it }
-                    setCallDirectionFromManager = { callDirection = it }
-                    setTechNameFromSocket = { name -> techName = name.ifBlank { "T\u00e9cnico" } }
-                    setRecordingAudioFromActivity = { isRecordingAudio = it }
-                    setEndedSessionForFeedback = { endedSessionId = it }
+                    setSessionIdFromSocket = { sid ->
+                        if (!isAccountIdentityWorkBlocked()) {
+                            sessionId = sid
+                            currentSessionId = sid
+                            voiceCallManager.bindSession(sid)
+                        }
+                    }
+                    setScreenFromSocket = { scr ->
+                        if (!isAccountIdentityWorkBlocked()) current = scr
+                    }
+                    setRemoteEnabledFromSocket = {
+                        if (!isAccountIdentityWorkBlocked()) remoteEnabled = it
+                    }
+                    setCallingFromSocket = {
+                        if (!isAccountIdentityWorkBlocked()) calling = it
+                    }
+                    setCallConnectedFromSocket = {
+                        if (!isAccountIdentityWorkBlocked()) callConnected = it
+                    }
+                    setCallStateFromManager = {
+                        if (!isAccountIdentityWorkBlocked()) callState = it
+                    }
+                    setCallDirectionFromManager = {
+                        if (!isAccountIdentityWorkBlocked()) callDirection = it
+                    }
+                    setTechNameFromSocket = { name ->
+                        if (!isAccountIdentityWorkBlocked()) {
+                            techName = name.ifBlank { "T\u00e9cnico" }
+                        }
+                    }
+                    setRecordingAudioFromActivity = {
+                        if (!isAccountIdentityWorkBlocked()) isRecordingAudio = it
+                    }
+                    setEndedSessionForFeedback = {
+                        if (!isAccountIdentityWorkBlocked()) endedSessionId = it
+                    }
                     applyPendingLaunchIntentNavigation()
+                    recoverPersistedActiveSupportSession()
                     startBootstrap(showAnimation = true)
                 }
 
-                LaunchedEffect(homeSnapshot.clientUid, homeSnapshot.client?.id) {
-                    registerNotificationTokenForClient(homeSnapshot.client?.id)
+                LaunchedEffect(
+                    homeSnapshot.clientUid,
+                    homeSnapshot.client?.id,
+                    accountDeletedAwaitingRestart
+                ) {
+                    if (!accountDeletedAwaitingRestart) {
+                        registerNotificationTokenForClient(homeSnapshot.client?.id)
+                    }
                 }
 
-                DisposableEffect(homeSnapshot.clientUid, homeSnapshot.client?.id) {
-                    val registration = clientNotificationRepository.listenClientNotifications(
-                        clientUid = homeSnapshot.clientUid,
-                        clientId = homeSnapshot.client?.id,
-                        onChanged = { records ->
-                            notificationCenterUiState = recordsToNotificationUiState(records)
-                        },
-                        onError = { err ->
-                            Log.w("SXS/Notifications", "Listener de notificações falhou", err)
+                DisposableEffect(
+                    homeSnapshot.clientUid,
+                    homeSnapshot.client?.id,
+                    accountDeletedAwaitingRestart
+                ) {
+                    if (accountDeletedAwaitingRestart) {
+                        clientNotificationRegistration?.remove()
+                        clientNotificationRegistration = null
+                        onDispose { }
+                    } else {
+                        val registration = clientNotificationRepository.listenClientNotifications(
+                            clientUid = homeSnapshot.clientUid,
+                            clientId = homeSnapshot.client?.id,
+                            onChanged = { records ->
+                                if (!isAccountIdentityWorkBlocked()) {
+                                    notificationCenterUiState =
+                                        recordsToNotificationUiState(records)
+                                }
+                            },
+                            onError = { err ->
+                                Log.w("SXS/Notifications", "Listener de notificações falhou", err)
+                            }
+                        )
+                        clientNotificationRegistration = registration
+                        onDispose {
+                            registration.remove()
+                            if (clientNotificationRegistration === registration) {
+                                clientNotificationRegistration = null
+                            }
                         }
-                    )
-                    onDispose { registration.remove() }
+                    }
                 }
 
                 LaunchedEffect(current) {
-                    if (current == Screen.HOME) {
+                    if (current == Screen.HOME && !accountDeletedAwaitingRestart) {
                         if (skipInitialHomeRefresh) {
                             skipInitialHomeRefresh = false
                             return@LaunchedEffect
@@ -3244,7 +4300,10 @@ class MainActivity : ComponentActivity() {
                             hasHandledFirstOnStart = true
                             return@LifecycleEventObserver
                         }
-                        if (currentScreen == Screen.HOME) {
+                        if (
+                            currentScreen == Screen.HOME &&
+                            !accountDeletedAwaitingRestartState
+                        ) {
                             startBootstrap(showAnimation = true)
                         }
                     }
@@ -3253,7 +4312,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(current) {
-                    if (current == Screen.HOME || current == Screen.WAITING) {
+                    if (
+                        !accountDeletedAwaitingRestart &&
+                        (current == Screen.HOME || current == Screen.WAITING)
+                    ) {
                         while (isActive) {
                             loadSupportQueueWaitStats { stats ->
                                 supportQueueWaitStats = stats
@@ -3267,6 +4329,7 @@ class MainActivity : ComponentActivity() {
                     val currentClientId = homeSnapshot.client?.id
                     if (
                         current == Screen.HOME &&
+                        !accountDeletedAwaitingRestart &&
                         homeSnapshot.shouldAutoOpenPurchase &&
                         !currentClientId.isNullOrBlank() &&
                         autoOpenedPurchaseClientId != currentClientId
@@ -3315,19 +4378,23 @@ class MainActivity : ComponentActivity() {
                             textMuted = Color(0xFF8A8A8E),
                             averageWaitLabel = homeAverageWaitLabel,
                             notificationState = notificationCenterUiState,
-                            openNotificationCenterSignal = notificationCenterOpenSignal,
                             onNotificationAction = { handleClientNotificationAction(it) },
                             onNotificationDismiss = { dismissClientNotification(it) }
                         )
 
                         Screen.HELP -> HelpScreen(
                             onClose = { current = Screen.HOME },
-                            onOpenPlayStore = { requestGooglePlayReviewOrOpenStore() },
+                            onOpenPlayStore = { openPlayStoreListing() },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
                         Screen.PRIVACY -> PrivacyPolicyScreen(
-                            onClose = { current = Screen.HOME },
+                            onClose = {
+                                if (!accountDeletionInProgress && !accountDeletedAwaitingRestart) {
+                                    current = Screen.HOME
+                                }
+                            },
+                            onRequestAccountDeletion = { openAccountDeletionConfirmation() },
                             textMuted = Color(0xFF8A8A8E)
                         )
 
@@ -3381,6 +4448,7 @@ class MainActivity : ComponentActivity() {
                                     cancelRequest(activeRequestId)
                                 } else {
                                     val localSupportId = pendingSupportSessionId
+                                    invalidateSupportRequestTracking(cancelJob = true)
                                     if (!localSupportId.isNullOrBlank()) {
                                         lifecycleScope.launch(Dispatchers.IO) {
                                             runCatching { clientSupportRepository.cancelSupportRequest(localSupportId) }
@@ -3425,11 +4493,7 @@ class MainActivity : ComponentActivity() {
                             onDeclineCall = { voiceCallManager.declineIncomingCall() },
                             onAudioClick = {
                                 ensureAudioPermission {
-                                    if (mediaRecorder == null) {
-                                        startAudioRecording()
-                                    } else {
-                                        stopAudioRecordingAndSend()
-                                    }
+                                    toggleAudioRecording()
                                 }
                             },
                             onAttachmentClick = {
@@ -3470,6 +4534,33 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        if (showAccountDeletionDialog) {
+                            AccountDeletionConfirmationDialog(
+                                confirmation = accountDeletionConfirmation,
+                                blockingMessage = accountDeletionLocalBlockMessage(),
+                                feedbackMessage = accountDeletionFeedback,
+                                inProgress = accountDeletionInProgress,
+                                onConfirmationChange = { value ->
+                                    accountDeletionConfirmation = value
+                                    accountDeletionFeedback = null
+                                },
+                                onDismiss = {
+                                    if (!accountDeletionInProgress) {
+                                        showAccountDeletionDialog = false
+                                        accountDeletionConfirmation = ""
+                                        accountDeletionFeedback = null
+                                    }
+                                },
+                                onConfirm = { confirmAccountDeletion() }
+                            )
+                        }
+
+                        if (accountDeletedAwaitingRestart) {
+                            AccountDeletionSuccessDialog(
+                                onReturnToStart = { restartAfterAccountDeletion() }
+                            )
+                        }
+
                         AnimatedVisibility(
                             visible = showStartupLoading,
                             enter = fadeIn(animationSpec = tween(durationMillis = 120)),
@@ -3488,7 +4579,6 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         appInForeground = true
         syncWaitingSupportForegroundService()
-        syncSessionAnchorForegroundService()
         reconcileRemoteAccessAfterResume()
         if (!currentSessionId.isNullOrBlank()) {
             clearTransientSupportNotifications(currentSessionId)
@@ -3504,6 +4594,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        discardAudioRecording()
         val incomingFromTech = currentCallUiState == CallState.INCOMING_RINGING &&
             currentCallDirection == CallDirection.TECH_TO_CLIENT
         val sessionId = currentSessionId
@@ -3514,32 +4605,39 @@ class MainActivity : ComponentActivity() {
         }
         appInForeground = false
         syncWaitingSupportForegroundService()
-        syncSessionAnchorForegroundService()
         super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (isAccountIdentityWorkBlocked()) return
         handleLaunchIntent(intent)
         applyPendingLaunchIntentNavigation()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(
+            KEY_ACCOUNT_DELETION_RESTART_PENDING,
+            accountDeletionRestartPending
+        )
+        super.onSaveInstanceState(outState)
+    }
+
     override fun onDestroy() {
+        FirebaseAuth.getInstance().removeAuthStateListener(accountDeletionAuthStateListener)
+        clientNotificationRegistration?.remove()
+        clientNotificationRegistration = null
+        unregisterWaitingCancellationReceiver()
+        invalidateSupportRequestTracking(cancelJob = true)
+        discardAudioRecording()
         stopIncomingCallAlert()
         appUpdateDialog?.dismiss()
         appUpdateDialog = null
-        super.onDestroy()
         stopWaitingSessionRecovery()
-        runCatching {
-            mediaRecorder?.apply {
-                reset()
-                release()
-            }
-        }
-        mediaRecorder = null
         stopTelemetryLoop()
         voiceCallManager.release()
+        super.onDestroy()
     }
 }
 
@@ -3613,35 +4711,43 @@ private fun HelpScreen(
         ) {
             PolicySection(
                 title = "1. Como iniciar um atendimento",
-                body = "Toque em SOLICITAR SUPORTE e aguarde a conexão com um técnico. Quando o atendimento for aceito, a sessão será aberta automaticamente no aplicativo."
+                body = "Toque em SOLICITAR SUPORTE e aguarde a conexão com um técnico. Quando o atendimento for aceito, a sessão será aberta automaticamente. Se o aplicativo for fechado ou reiniciado durante a espera ou o atendimento, o Suporte X tentará retomar o estado confirmado pelo servidor."
             )
             PolicySection(
                 title = "2. Crédito e liberação de atendimento",
-                body = "O primeiro atendimento pode ser disponibilizado gratuitamente, conforme o status da sua conta. Depois disso, para novos atendimentos, é necessário ter créditos disponíveis no aplicativo."
+                body = "O primeiro atendimento pode ser disponibilizado gratuitamente, conforme o status da conta. Depois disso, novos atendimentos dependem de créditos disponíveis. O saldo e a regra aplicável aparecem na área de créditos da tela inicial."
             )
             PolicySection(
                 title = "3. Compra de créditos",
-                body = "Na tela inicial, você pode abrir a área de créditos, escolher um pacote e solicitar a compra pelos canais oficiais. As opções de Cartão e PIX podem aparecer no app conforme a etapa de implantação."
+                body = "Na tela inicial, abra a área de créditos, escolha um pacote disponível e siga o canal oficial apresentado. Confira pacote, quantidade, valor e forma de pagamento antes de confirmar a solicitação."
             )
             PolicySection(
-                title = "4. Permissões durante o suporte",
-                body = "Alguns atendimentos podem exigir permissões temporárias, como compartilhamento de tela, envio de arquivos, uso do microfone e acesso assistido. Essas permissões são opcionais e você controla todas elas no app."
+                title = "4. Chat, arquivos e chamada",
+                body = "Na sessão, você pode conversar por texto, enviar imagens ou arquivos e trocar mensagens de áudio. A chamada de voz usa o microfone somente depois da sua ação para iniciar ou aceitar a chamada e pode ser encerrada no próprio aplicativo."
             )
             PolicySection(
-                title = "5. Segurança da sessão",
-                body = "Nenhuma ação remota é iniciada sem sua autorização explícita. Você pode interromper o compartilhamento, desligar o acesso remoto e revogar permissões a qualquer momento."
+                title = "5. Compartilhamento e acesso remoto",
+                body = "O compartilhamento de tela exige a confirmação do Android. O acesso remoto assistido é separado, opcional e exige sua concordância antes de abrir as configurações de Acessibilidade. Você pode interromper o compartilhamento, desligar o acesso remoto ou revogar a permissão a qualquer momento."
             )
             PolicySection(
-                title = "6. Encerrar atendimento",
-                body = "Quando desejar, finalize o suporte pelo botão de encerramento na tela de sessão. Você também pode interromper permissões diretamente nas configurações do seu dispositivo."
+                title = "6. Segurança e privacidade",
+                body = "Autorize recursos sensíveis somente durante um atendimento solicitado por você e confira o técnico identificado na sessão. Evite abrir senhas, códigos bancários ou outras informações desnecessárias enquanto compartilha a tela. O Suporte X nunca deve pedir que você revele senhas ou códigos de verificação."
             )
             PolicySection(
-                title = "7. Problemas comuns",
-                body = "Se a conexão estiver instável, verifique internet, bateria, armazenamento e permissões do app. Em caso de falha de acesso remoto, confira se o serviço de acessibilidade do Suporte X está ativado."
+                title = "7. Notificações e retomada",
+                body = "O sino da tela inicial reúne avisos do Suporte X. As notificações do Android ajudam a acompanhar a fila, o aceite do técnico, mensagens e chamadas quando o app não está visível. Se uma sessão não reaparecer após a reconexão, feche e abra o aplicativo com internet ativa."
             )
             PolicySection(
-                title = "8. Canais oficiais",
-                body = "Para suporte administrativo, dúvidas sobre privacidade ou uso da plataforma, utilize os canais oficiais da Suporte X informados no aplicativo."
+                title = "8. Encerrar e avaliar o atendimento",
+                body = "Use ENCERRAR SUPORTE na tela da sessão quando desejar finalizar. Ao encerrar, o aplicativo interrompe os recursos ativos e pode solicitar sua avaliação. Se o Serviço de Acessibilidade continuar ativado no Android, desative-o nas Configurações do dispositivo."
+            )
+            PolicySection(
+                title = "9. Problemas comuns",
+                body = "Se a conexão estiver instável, verifique internet, bateria, armazenamento e permissões do app. Para chamada, confira o microfone. Para compartilhamento, confirme a tela inteira quando o Android solicitar. Para acesso remoto, confira se o Serviço de Acessibilidade do Suporte X está ativado e volte ao aplicativo."
+            )
+            PolicySection(
+                title = "10. Conta, dados e canais oficiais",
+                body = "Para consultar a política ou excluir sua conta e seus dados, abra Privacidade na tela inicial. Para suporte administrativo ou dúvidas, use suportex@xavierassessoriadigital.com.br ou o WhatsApp +55 65 99649-7550."
             )
             Spacer(Modifier.height(18.dp))
         }
@@ -3672,6 +4778,7 @@ private fun HelpScreen(
 @Composable
 private fun PrivacyPolicyScreen(
     onClose: () -> Unit,
+    onRequestAccountDeletion: () -> Unit,
     textMuted: Color
 ) {
     Column(
@@ -3691,7 +4798,7 @@ private fun PrivacyPolicyScreen(
         Text("Política de Privacidade", fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(6.dp))
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
-        Text("Última atualização: 31 de março de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 23 de julho de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -3700,45 +4807,185 @@ private fun PrivacyPolicyScreen(
                 .verticalScroll(rememberScrollState())
         ) {
             Text(
-                "A Suporte X valoriza a privacidade e a segurança dos dados dos usuários. Esta Política de Privacidade descreve como coletamos, utilizamos, armazenamos e protegemos as informações durante a utilização do aplicativo e dos serviços de suporte técnico remoto.",
+                "O Suporte X é operado por Xavier Assessoria Digital, CNPJ 45.765.097/0001-61, responsável pelo tratamento descrito nesta Política de Privacidade. Este documento explica como os dados são acessados, coletados, usados, compartilhados, armazenados e protegidos durante o uso do aplicativo e do suporte técnico remoto.",
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
             Spacer(Modifier.height(14.dp))
             PolicySection(
                 title = "1. Dados que coletamos",
-                body = "Para a prestação adequada do serviço, podemos coletar as seguintes informações:\n\n- Identificadores de conta e atendimento (como `clientUid`, `clientId` e `sessionId`)\n- Telefone verificado (quando disponível), nome informado e dados de vínculo da conta\n- Informações técnicas do dispositivo (marca, modelo e versão do Android)\n- Telemetria de sessão (rede, bateria, armazenamento e status de permissões)\n- Mensagens trocadas no chat (texto, áudio e anexos)\n- Registros operacionais de suporte, créditos e tentativas de verificação de número\n\nEssas informações são coletadas para viabilizar e proteger o funcionamento do serviço."
+                body = "Conforme os recursos usados, podemos tratar:\n\n- Identificadores de conta, dispositivo, solicitação e sessão\n- Nome, telefone verificado e dados informados durante o atendimento\n- Marca, modelo, versão do Android, rede, bateria, armazenamento e status de permissões\n- Token de notificações e eventos necessários para avisos de fila e atendimento\n- Saldo de créditos, histórico de uso e solicitações de compra\n- Mensagens, imagens, anexos e mensagens de áudio enviados no chat\n- Registros de segurança, diagnóstico, fila, chamadas e ações da sessão\n\nO compartilhamento de tela e a chamada de voz são transmitidos em tempo real e não são gravados por padrão. Mensagens de áudio enviadas no chat são arquivos do atendimento."
             )
             PolicySection(
-                title = "2. Finalidade do uso dos dados",
-                body = "Os dados coletados são utilizados para:\n\n- Identificar e autenticar o usuário durante o atendimento\n- Realizar suporte técnico remoto com chat, áudio, compartilhamento e controle assistido\n- Registrar histórico de sessões e eventos para segurança e auditoria\n- Diagnosticar e solucionar problemas técnicos\n- Viabilizar controle de créditos, pacotes e solicitações de compra\n- Melhorar a qualidade, estabilidade e segurança do serviço"
+                title = "2. Finalidades e bases legais",
+                body = "Os dados são tratados para autenticar o usuário; prestar o suporte solicitado; manter fila, chat, chamada, compartilhamento e controle assistido; administrar créditos e solicitações de compra; enviar avisos operacionais; prevenir fraude e abuso; diagnosticar falhas; cumprir obrigações legais; e responder ao titular.\n\nConforme o caso, o tratamento se apoia na execução do serviço ou de procedimentos solicitados pelo usuário, no consentimento quando exigido, no legítimo interesse para segurança e melhoria com proteção dos direitos do titular, no cumprimento de obrigação legal e no exercício regular de direitos."
             )
             PolicySection(
-                title = "3. Compartilhamento de dados",
-                body = "A Suporte X não vende, aluga ou comercializa dados pessoais dos usuários.\n\nO compartilhamento de informações ocorre apenas quando necessário para operação do serviço, como com:\n\n- Provedores de infraestrutura, autenticação e banco de dados\n- Serviços de armazenamento de mídias e arquivos de suporte\n- Plataformas de comunicação e integração operacional\n\nTodos os parceiros devem seguir padrões de segurança compatíveis com a legislação aplicável."
+                title = "3. Compartilhamento e operadores",
+                body = "Não vendemos, alugamos nem comercializamos dados pessoais. Usamos prestadores necessários à operação, incluindo Google Firebase para autenticação, banco de dados, armazenamento e notificações; Render para hospedagem do backend; Cloudflare para segurança e conectividade; e, quando o usuário escolhe esses canais, Meta/WhatsApp e o provedor de e-mail.\n\nTécnicos acessam somente os dados necessários ao atendimento sob sua responsabilidade. Autoridades podem receber informações diante de obrigação legal válida. Alguns prestadores podem processar dados fora do Brasil, com medidas contratuais e de segurança compatíveis com a legislação aplicável."
             )
             PolicySection(
-                title = "4. Permissões e controle do usuário",
-                body = "Alguns recursos do aplicativo podem solicitar permissões específicas do dispositivo, como:\n\n- Compartilhamento de tela\n- Acesso remoto assistido via acessibilidade\n- Uso do microfone para áudio de atendimento\n- Envio de arquivos, imagens e áudios\n\nEssas permissões são sempre solicitadas com autorização explícita do usuário e podem ser interrompidas ou revogadas a qualquer momento."
+                title = "4. Permissões, tela e Acessibilidade",
+                body = "O compartilhamento de tela só começa após a confirmação do Android. O microfone é usado em chamadas ou mensagens de áudio iniciadas pelo usuário. O envio de arquivos ocorre somente após a escolha do conteúdo.\n\nO Serviço de Acessibilidade é opcional e serve exclusivamente para o controle remoto assistido em uma sessão iniciada pelo usuário. Quando autorizado, ele pode permitir ao técnico designado ler o conteúdo exibido e as janelas do dispositivo para localizar campos e controles, digitar ou editar texto, executar toques e gestos e acionar Voltar, Início e Recentes.\n\nComandos remotos são bloqueados fora de sessão ativa e sem autorização no app. O recurso não é usado para anúncios ou monitoramento oculto. O usuário pode interromper o compartilhamento, revogar o controle ou desativar o serviço nas configurações do Android a qualquer momento."
             )
             PolicySection(
                 title = "5. Armazenamento e retenção de dados",
-                body = "Os dados são armazenados pelo período necessário para:\n\n- Prestação do suporte técnico\n- Cumprimento de obrigações legais e regulatórias\n- Segurança operacional e rastreabilidade de eventos\n\nDeterminados registros operacionais podem seguir janelas técnicas de retenção (como 15 a 30 dias), conforme a natureza do dado e a política interna de segurança."
+                body = "Tentativas técnicas de verificação têm prazo previsto de até 15 dias. Registros finais de fila, sessões encerradas, mensagens, mídias e relatórios operacionais têm prazo previsto de até 30 dias após o encerramento, aplicado por rotinas periódicas de limpeza. Perfil e saldo permanecem enquanto a conta estiver ativa.\n\nAlguns registros podem ser conservados pelo prazo necessário para obrigação legal, prevenção de fraude, segurança ou exercício regular de direitos. Cópias de segurança podem levar um ciclo técnico adicional para expirar e não são reutilizadas na operação normal."
             )
             PolicySection(
-                title = "6. Direitos do usuário",
-                body = "Em conformidade com a Lei Geral de Proteção de Dados (LGPD - Lei nº 13.709/2018), o usuário possui direito de:\n\n- Solicitar acesso aos seus dados\n- Corrigir dados incompletos ou desatualizados\n- Solicitar exclusão de dados, quando aplicável\n- Solicitar informações sobre tratamento e compartilhamento de dados\n\nAs solicitações podem ser feitas pelos canais oficiais da Suporte X."
+                title = "6. Direitos e exclusão",
+                body = "Nos limites da Lei Geral de Proteção de Dados (Lei nº 13.709/2018), o usuário pode solicitar confirmação e acesso; correção; anonimização, bloqueio ou eliminação de dados desnecessários, excessivos ou irregulares; portabilidade, quando aplicável; informação sobre compartilhamento; revogação de consentimento; e revisão de decisões automatizadas, quando houver.\n\nA exclusão pode ser iniciada pelo botão abaixo ou em https://suportex.app/excluir-conta. Ao confirmar, apagamos ou desvinculamos perfil, vínculos, notificações, filas, mensagens, mídias e demais dados pessoais associados, ressalvadas as retenções exigidas por lei ou necessárias ao exercício regular de direitos."
             )
             PolicySection(
                 title = "7. Segurança das informações",
-                body = "A Suporte X adota medidas técnicas e organizacionais para proteger os dados contra acesso não autorizado, alteração, divulgação ou destruição indevida.\n\nEntre as medidas aplicadas estão:\n\n- Controle de acesso por autenticação\n- Monitoramento e registros de auditoria\n- Proteção de infraestrutura e serviços de backend\n- Revisões técnicas periódicas de segurança"
+                body = "Adotamos autenticação, controle de acesso por usuário e sessão, conexões criptografadas, validação no servidor, limitação de arquivos, registros de segurança e revisões técnicas. Nenhum sistema elimina todo risco; por isso, os controles são monitorados e atualizados continuamente."
             )
             PolicySection(
-                title = "8. Contato",
-                body = "Para dúvidas, solicitações ou questões relacionadas à privacidade e proteção de dados, entre em contato com o suporte oficial da Suporte X pelos canais disponibilizados no aplicativo."
+                title = "8. Contato e alterações",
+                body = "Responsável: Xavier Assessoria Digital, CNPJ 45.765.097/0001-61.\n\nE-mail: suportex@xavierassessoriadigital.com.br\nWhatsApp: +55 65 99649-7550\n\nEsta política pode ser atualizada quando o serviço, os operadores ou a legislação mudarem. A data exibida no início identifica a versão vigente."
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+        HorizontalDivider(color = Color(0xFFE1E3E7))
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = onRequestAccountDeletion,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = Color.White
+            )
+        ) {
+            Text(
+                text = "Excluir minha conta",
+                fontWeight = FontWeight.Bold
             )
         }
     }
+}
+
+@Composable
+private fun AccountDeletionConfirmationDialog(
+    confirmation: String,
+    blockingMessage: String?,
+    feedbackMessage: String?,
+    inProgress: Boolean,
+    onConfirmationChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val visibleMessage = blockingMessage ?: feedbackMessage
+    val canConfirm =
+        blockingMessage == null &&
+            confirmation == ACCOUNT_DELETION_CONFIRMATION &&
+            !inProgress
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = {
+            if (!inProgress) onDismiss()
+        },
+        title = {
+            Text(
+                text = "Excluir conta e dados",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    text = "Esta ação é permanente. Sua conta, histórico e dados vinculados serão excluídos conforme as regras de retenção aplicáveis."
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Para continuar, digite exatamente:",
+                    fontSize = 13.sp
+                )
+                Text(
+                    text = ACCOUNT_DELETION_CONFIRMATION,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = confirmation,
+                    onValueChange = onConfirmationChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !inProgress && blockingMessage == null,
+                    singleLine = true,
+                    label = { Text("Confirmação") }
+                )
+
+                if (inProgress) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("Excluindo sua conta com segurança...")
+                    }
+                } else if (!visibleMessage.isNullOrBlank()) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = visibleMessage,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = canConfirm,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Excluir definitivamente", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !inProgress
+            ) {
+                Text("Cancelar")
+            }
+        }
+    )
+}
+
+@Composable
+private fun AccountDeletionSuccessDialog(
+    onReturnToStart: () -> Unit
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = {},
+        title = {
+            Text(
+                text = "Conta excluída",
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Text(
+                text = "Sua conta e os dados vinculados foram excluídos. Ao voltar ao início, o Suporte X criará uma nova identidade somente para um novo uso do aplicativo."
+            )
+        },
+        confirmButton = {
+            Button(onClick = onReturnToStart) {
+                Text("Voltar ao início", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
 }
 
 @Composable
@@ -3765,7 +5012,7 @@ private fun TermsOfUseScreen(
         Text("Suporte X", color = textMuted, fontSize = 13.sp)
         Text("Operado por Xavier Assessoria Digital", color = textMuted, fontSize = 13.sp)
         Text("CNPJ: 45.765.097/0001-61", color = textMuted, fontSize = 13.sp)
-        Text("Última atualização: 31 de março de 2026", color = textMuted, fontSize = 13.sp)
+        Text("Última atualização: 23 de julho de 2026", color = textMuted, fontSize = 13.sp)
         Spacer(Modifier.height(14.dp))
 
         Column(
@@ -3779,43 +5026,47 @@ private fun TermsOfUseScreen(
             )
             PolicySection(
                 title = "2. Aceitação dos termos",
-                body = "Ao utilizar o aplicativo Suporte X, o usuário declara que:\n\n- leu e compreendeu estes Termos de Uso\n- concorda com as condições aqui estabelecidas\n- autoriza o funcionamento das funcionalidades necessárias ao suporte técnico remoto\n\nCaso não concorde com estes termos, o usuário não deverá utilizar o aplicativo."
+                body = "Ao utilizar o Suporte X, o usuário declara que leu e compreendeu estes Termos de Uso e concorda com as condições aplicáveis ao serviço. Permissões sensíveis, compartilhamento de tela, microfone e acesso remoto assistido dependem de avisos e autorizações próprios no contexto de cada recurso; a aceitação destes termos não substitui esses consentimentos.\n\nCaso não concorde com estes termos, o usuário não deverá solicitar atendimento."
             )
             PolicySection(
                 title = "3. Elegibilidade e acesso ao atendimento",
-                body = "O acesso ao atendimento segue as regras operacionais da plataforma:\n\n- o primeiro atendimento pode ser disponibilizado gratuitamente\n- após o primeiro atendimento, novos atendimentos dependem de créditos disponíveis\n- sem crédito disponível, o usuário deve solicitar compra de pacote para liberar novos atendimentos"
+                body = "O usuário deve ter capacidade legal para contratar o serviço ou estar devidamente representado e fornecer informações verdadeiras quando necessárias à identificação e ao atendimento.\n\nO primeiro atendimento pode ser disponibilizado gratuitamente, conforme o status da conta. Depois disso, novos atendimentos dependem de créditos disponíveis. Sem saldo, o usuário poderá solicitar um pacote pelos canais oferecidos na plataforma."
             )
             PolicySection(
                 title = "4. Funcionamento do suporte remoto",
-                body = "Durante uma sessão de suporte, o usuário poderá autorizar funcionalidades como:\n\n- compartilhamento de tela\n- envio de arquivos e imagens\n- comunicação por chat e áudio\n- controle remoto assistido do dispositivo\n\nEssas funcionalidades só são ativadas com autorização explícita e podem ser interrompidas a qualquer momento."
+                body = "Durante uma sessão, o usuário pode usar chat, enviar arquivos ou mensagens de áudio, iniciar ou aceitar chamada de voz e autorizar compartilhamento de tela e controle remoto assistido.\n\nCompartilhamento e controle remoto são recursos distintos. Cada um exige ação do usuário e pode ser interrompido a qualquer momento. O Serviço de Acessibilidade é usado somente para a assistência remota autorizada, conforme o aviso específico apresentado antes da ativação."
             )
             PolicySection(
                 title = "5. Créditos, pacotes e pagamentos",
-                body = "A compra de créditos é realizada por pacotes disponibilizados na plataforma. A solicitação pode ocorrer pelos canais oficiais, incluindo WhatsApp. Algumas modalidades de pagamento podem ser exibidas no aplicativo conforme etapa de implantação operacional."
+                body = "Pacotes, quantidade de atendimentos, preço e formas de pagamento são os exibidos ou confirmados no canal oficial antes da contratação. Créditos liberam a solicitação do atendimento, mas não garantem um resultado técnico específico.\n\nCancelamentos, estornos e reembolsos observarão as condições informadas na contratação e os direitos assegurados pela legislação de consumo. Em caso de divergência de saldo ou cobrança, o usuário deve contatar os canais oficiais."
             )
             PolicySection(
                 title = "6. Responsabilidades do usuário",
-                body = "O usuário é responsável por:\n\n- conceder permissões apenas quando desejar iniciar um atendimento\n- manter controle sobre acessos concedidos durante a sessão\n- encerrar o atendimento quando considerar necessário\n- não utilizar o aplicativo para atividades ilegais, abusivas ou fraudulentas"
+                body = "O usuário é responsável por:\n\n- proteger o acesso ao dispositivo, telefone e códigos de verificação\n- conceder permissões somente quando desejar usar o respectivo recurso\n- acompanhar a sessão e interromper acessos que não queira manter\n- fazer cópia de segurança de informações importantes antes de intervenções relevantes, quando possível\n- não usar o serviço para fraude, abuso, violação de direitos ou atividade ilegal"
             )
             PolicySection(
-                title = "7. Limitação de responsabilidade",
-                body = "A Xavier Assessoria Digital não se responsabiliza por:\n\n- falhas causadas por terceiros, operadoras ou provedores externos\n- indisponibilidade temporária de serviços de infraestrutura\n- problemas decorrentes de uso indevido do dispositivo ou do aplicativo pelo usuário"
+                title = "7. Responsabilidades da operadora",
+                body = "A Xavier Assessoria Digital presta o serviço com medidas razoáveis de qualidade, segurança e controle de acesso. O técnico deve atuar dentro do atendimento atribuído e das autorizações concedidas pelo usuário.\n\nO usuário deve comunicar imediatamente qualquer acesso, cobrança ou comportamento que considere indevido pelos canais oficiais."
             )
             PolicySection(
-                title = "8. Privacidade e proteção de dados",
-                body = "O tratamento de dados pessoais e operacionais segue a Política de Privacidade do Suporte X e a legislação aplicável, em especial a LGPD (Lei nº 13.709/2018)."
+                title = "8. Disponibilidade e limites do serviço",
+                body = "O diagnóstico e a solução dependem do aparelho, sistema, conexão, disponibilidade de terceiros e natureza do problema. Por isso, não é garantida a resolução de toda falha ou a disponibilidade ininterrupta da plataforma.\n\nNa medida permitida por lei, a operadora não responde por fatos fora de seu controle razoável nem por uso indevido do aplicativo pelo usuário. Esta cláusula não exclui responsabilidades legais nem direitos previstos no Código de Defesa do Consumidor."
             )
             PolicySection(
-                title = "9. Alterações dos termos",
-                body = "Estes Termos de Uso podem ser atualizados para refletir ajustes técnicos, operacionais, legais ou de segurança. A versão vigente estará disponível no aplicativo com a respectiva data de atualização."
+                title = "9. Privacidade e proteção de dados",
+                body = "O tratamento de dados pessoais e operacionais segue a Política de Privacidade do Suporte X e a legislação aplicável, em especial a LGPD (Lei nº 13.709/2018). A política informa dados tratados, finalidades, operadores, retenção, segurança, direitos e formas de exclusão da conta."
             )
             PolicySection(
-                title = "10. Legislação aplicável e foro",
-                body = "Este serviço é regido pelas leis da República Federativa do Brasil. Fica eleito o foro da comarca competente para dirimir eventuais controvérsias, ressalvadas as hipóteses legais de competência específica."
+                title = "10. Suspensão e encerramento da conta",
+                body = "O acesso pode ser limitado ou suspenso quando necessário para investigar fraude, abuso, risco de segurança, violação destes termos ou obrigação legal, com preservação dos direitos aplicáveis. O usuário pode solicitar a exclusão da conta pela área Privacidade do aplicativo ou em https://suportex.app/excluir-conta."
             )
             PolicySection(
-                title = "11. Contato",
-                body = "Empresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895W\nResidencial Paraíso\nNova Mutum - MT\nCEP: 78.454-528\n\nE-mail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
+                title = "11. Alterações dos termos",
+                body = "Estes termos podem ser atualizados para refletir mudanças técnicas, operacionais, legais ou de segurança. A versão vigente ficará disponível no aplicativo com a respectiva data. Mudanças que exijam nova autorização não substituem os consentimentos específicos do usuário."
+            )
+            PolicySection(
+                title = "12. Legislação, foro e contato",
+                body = "O serviço é regido pelas leis da República Federativa do Brasil. Eventuais controvérsias serão tratadas no foro competente definido pela legislação, inclusive o do domicílio do consumidor quando aplicável.\n\nEmpresa responsável:\nXavier Assessoria Digital\n\nCNPJ:\n45.765.097/0001-61\n\nEndereço:\nRua dos Jequitibás, 1895W\nResidencial Paraíso\nNova Mutum - MT\nCEP: 78.454-528\n\nE-mail:\nsuportex@xavierassessoriadigital.com.br\n\nTelefone / WhatsApp:\n+55 65 99649-7550"
             )
         }
     }

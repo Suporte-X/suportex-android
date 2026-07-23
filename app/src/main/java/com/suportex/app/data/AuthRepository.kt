@@ -42,6 +42,11 @@ class AuthRepository {
         return user.getIdToken(forceRefresh).await().token ?: ""
     }
 
+    fun signOut() {
+        auth.signOut()
+        lastLoggedUid = null
+    }
+
     private suspend fun <T> Task<T>.await(): T =
         suspendCancellableCoroutine { cont ->
             addOnCompleteListener { task ->

@@ -14,8 +14,8 @@ android {
         applicationId = "com.suportex.app"
         minSdk = 24
         targetSdk = 37
-        versionCode = 11
-        versionName = "1.1.7"
+        versionCode = 12
+        versionName = "1.1.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -53,8 +53,6 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.navigation.compose)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.compose.material.icons.extended)
 
     implementation(libs.okhttp)
@@ -65,11 +63,10 @@ dependencies {
     implementation(libs.material)
 
     implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.firestore.ktx)
-    implementation(libs.firebase.messaging.ktx)
-    implementation(libs.firebase.auth.ktx)
+    implementation(libs.firebase.firestore)
+    implementation(libs.firebase.messaging)
+    implementation(libs.firebase.auth)
     implementation(libs.firebase.pnv)
-    implementation(libs.firebase.analytics)
 
     implementation(libs.kotlinx.coroutines.play.services)
 

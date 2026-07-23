@@ -65,9 +65,9 @@ import com.suportex.app.ui.session.AudioMessagePlayer
 import com.suportex.app.ui.session.UploadingAudioPlaceholder
 import com.suportex.app.ui.session.rememberAudioPlaybackController
 import coil.compose.AsyncImage
+import kotlinx.coroutines.launch
 import java.util.Locale
 import java.util.UUID
-import org.json.JSONObject
 
 @Composable
 fun SessionScreen(
@@ -95,6 +95,7 @@ fun SessionScreen(
     onEndSupport: () -> Unit
 ) {
     val chat = remember { ChatRepository() }
+    val coroutineScope = rememberCoroutineScope()
     DisposableEffect(chat) {
         Conn.chatRepository = chat
         onDispose {
@@ -803,7 +804,7 @@ fun SessionScreen(
                     Button(
                         onClick = {
                             if (sessionId != null && input.isNotBlank()) {
-                                val trimmed = input.trim()
+                                val trimmed = input.trim().take(2_000)
                                 val messageId = UUID.randomUUID().toString()
                                 val pending = Message(
                                     id = messageId,
@@ -813,15 +814,27 @@ fun SessionScreen(
                                 )
                                 pendingMessages.removeAll { it.id == pending.id }
                                 pendingMessages.add(pending)
-                                val payload = JSONObject().apply {
-                                    put("sessionId", sessionId)
-                                    put("from", "client")
-                                    put("id", messageId)
-                                    put("text", trimmed)
-                                }
                                 Log.d("ChatDedup", "origin=android-send id=$messageId sessionId=$sessionId")
-                                Conn.socket?.emit("session:chat:send", payload)
                                 input = ""
+                                coroutineScope.launch {
+                                    runCatching {
+                                        chat.sendText(
+                                            sessionId = sessionId,
+                                            from = "client",
+                                            text = trimmed,
+                                            messageId = messageId,
+                                            timestamp = pending.createdAt
+                                        )
+                                    }.onFailure { error ->
+                                        Log.w(
+                                            "ChatDedup",
+                                            "Falha ao enviar mensagem id=$messageId sessionId=$sessionId",
+                                            error
+                                        )
+                                        pendingMessages.removeAll { it.id == messageId }
+                                        toastOnce("Não foi possível enviar a mensagem. Tente novamente.")
+                                    }
+                                }
                             } else if (sessionId == null) {
                                 toastOnce("Sessão ainda não aceita pelo técnico.")
                             }

@@ -54,8 +54,18 @@ class FirebasePhoneIdentityProvider(
     }
 
     override suspend fun saveVerifiedPhoneNumber(phoneNumber: String?) {
+        val normalized = phoneNumber?.trim()?.takeIf { it.isNotBlank() }
         prefs.edit {
-            putString(KEY_VERIFIED_PHONE, phoneNumber?.trim()?.takeIf { it.isNotBlank() })
+            if (normalized == null) {
+                remove(KEY_VERIFIED_PHONE)
+            } else {
+                putString(KEY_VERIFIED_PHONE, normalized)
+            }
+        }
+        if (normalized == null) {
+            appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE).edit {
+                remove(KEY_VERIFIED_PHONE)
+            }
         }
     }
 
@@ -79,8 +89,8 @@ class FirebasePhoneIdentityProvider(
 
     override suspend fun verifyWithPnv(activity: Activity): PhonePnvVerificationResult {
         return try {
-            val result = FirebasePhoneNumberVerification.getInstance(activity)
-                .getVerifiedPhoneNumber()
+            val result = FirebasePhoneNumberVerification.getInstance()
+                .getVerifiedPhoneNumber(activity)
                 .await()
             val phoneNumber = result.getPhoneNumber().trim()
             val token = result.getToken().toString().trim()

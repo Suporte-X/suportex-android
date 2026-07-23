@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $androidRepo = Split-Path -Parent $scriptDir
 $webRepoDefault = Join-Path $env:USERPROFILE "Workspaces\SuporteX\web-servidor"
+$hubRoot = Join-Path $env:USERPROFILE "Workspaces\SuporteX\SuporteX-HUB"
 $memoryConfig = Join-Path $androidRepo ".codex-memory\config.json"
 
 function Resolve-WebRepo {
@@ -101,6 +102,18 @@ $targets += [pscustomobject]@{
     label = "web-secrets"
     source = Join-Path $webRepo ".secrets"
     rel = "web-servidor\.secrets"
+    type = "dir"
+}
+$targets += [pscustomobject]@{
+    label = "hub-release-keys"
+    source = Join-Path $hubRoot "01_CHAVES"
+    rel = "SuporteX-HUB\01_CHAVES"
+    type = "dir"
+}
+$targets += [pscustomobject]@{
+    label = "hub-signing-guides"
+    source = Join-Path $hubRoot "05_GUIAS"
+    rel = "SuporteX-HUB\05_GUIAS"
     type = "dir"
 }
 

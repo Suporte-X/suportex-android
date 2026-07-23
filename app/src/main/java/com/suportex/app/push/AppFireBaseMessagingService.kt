@@ -85,9 +85,8 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
         val title = data["title"]?.trim()?.takeIf { it.isNotBlank() } ?: "Suporte X"
         val body = data["body"]?.trim().orEmpty()
         val intent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_CLIENT_NOTIFICATION
-            putExtra("notificationId", notificationId)
-            putExtra("actionType", data["actionType"]?.trim().orEmpty())
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
         val pendingIntent = PendingIntent.getActivity(
@@ -104,6 +103,7 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .build()
         val manager = getSystemService(NotificationManager::class.java) ?: return
         manager.notify(notificationId.hashCode(), notification)
@@ -126,6 +126,5 @@ class AppFirebaseMessagingService : FirebaseMessagingService() {
 
     private companion object {
         const val CHANNEL_CLIENT_NOTIFICATIONS = "client_notifications"
-        const val ACTION_OPEN_CLIENT_NOTIFICATION = "com.suportex.app.action.OPEN_CLIENT_NOTIFICATION"
     }
 }

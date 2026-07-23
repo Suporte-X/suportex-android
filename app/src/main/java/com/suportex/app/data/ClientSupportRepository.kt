@@ -27,8 +27,213 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.Date
+import java.util.LinkedHashSet
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+
+internal data class SupportRequestToken(
+    val generation: Long,
+    val localSupportSessionId: String
+)
+
+internal enum class SupportQueueConfirmationSource {
+    ACK,
+    LEGACY_EVENT
+}
+
+internal data class SupportQueueConfirmation(
+    val token: SupportRequestToken,
+    val requestId: String,
+    val source: SupportQueueConfirmationSource,
+    val reused: Boolean
+)
+
+internal enum class SupportCorrelationStatus {
+    CONFIRMED,
+    DUPLICATE,
+    IGNORED
+}
+
+internal data class SupportCorrelationResult(
+    val status: SupportCorrelationStatus,
+    val confirmation: SupportQueueConfirmation? = null
+)
+
+/**
+ * Correlaciona ACKs e o evento legado `support:enqueued` com uma única solicitação local.
+ *
+ * A geração impede que respostas atrasadas de uma solicitação anterior alterem a fila atual.
+ * O evento legado sem `localSupportSessionId` continua aceito enquanto ainda não existe um
+ * `requestId` confirmado; depois disso, apenas duplicatas do mesmo request são toleradas.
+ */
+internal class SupportRequestCorrelation {
+    private data class ActiveRequest(
+        val token: SupportRequestToken,
+        var confirmation: SupportQueueConfirmation? = null
+    )
+
+    private var generation = 0L
+    private var active: ActiveRequest? = null
+    private var untaggedLegacyEventIsSafe = true
+    private val knownRequestIds = LinkedHashSet<String>()
+
+    @Synchronized
+    fun begin(localSupportSessionId: String): SupportRequestToken {
+        val normalized = localSupportSessionId.trim()
+        require(normalized.isNotBlank()) { "localSupportSessionId obrigatorio" }
+        generation += 1
+        return SupportRequestToken(generation, normalized).also { token ->
+            active = ActiveRequest(token)
+        }
+    }
+
+    @Synchronized
+    fun currentToken(): SupportRequestToken? = active?.token
+
+    @Synchronized
+    fun isActive(token: SupportRequestToken): Boolean = active?.token == token
+
+    @Synchronized
+    fun confirmFromAck(
+        token: SupportRequestToken,
+        ackLocalSupportSessionId: String?,
+        requestId: String,
+        reused: Boolean
+    ): SupportCorrelationResult {
+        val current = active ?: return ignored()
+        if (current.token != token) return ignored()
+        val ackLocalId = ackLocalSupportSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (ackLocalId != null && ackLocalId != token.localSupportSessionId) return ignored()
+        return confirm(
+            current = current,
+            requestId = requestId,
+            source = SupportQueueConfirmationSource.ACK,
+            reused = reused
+        )
+    }
+
+    @Synchronized
+    fun confirmFromLegacyEvent(
+        eventLocalSupportSessionId: String?,
+        requestId: String
+    ): SupportCorrelationResult {
+        val current = active ?: return ignored()
+        val eventLocalId = eventLocalSupportSessionId?.trim()?.takeIf { it.isNotBlank() }
+        if (eventLocalId != null && eventLocalId != current.token.localSupportSessionId) {
+            return ignored()
+        }
+        val normalizedRequestId = requestId.trim()
+        if (
+            eventLocalId == null &&
+            current.confirmation == null &&
+            (
+                !untaggedLegacyEventIsSafe ||
+                    knownRequestIds.contains(normalizedRequestId)
+                )
+        ) {
+            return ignored()
+        }
+        return confirm(
+            current = current,
+            requestId = normalizedRequestId,
+            source = SupportQueueConfirmationSource.LEGACY_EVENT,
+            reused = false
+        )
+    }
+
+    @Synchronized
+    fun canApplyServerError(
+        eventLocalSupportSessionId: String?,
+        eventRequestId: String?
+    ): Boolean {
+        val current = active ?: return false
+        val localId = eventLocalSupportSessionId?.trim()?.takeIf { it.isNotBlank() }
+        val requestId = eventRequestId?.trim()?.takeIf { it.isNotBlank() }
+        if (localId == null && requestId == null) return false
+        if (localId != null && localId != current.token.localSupportSessionId) return false
+        if (current.confirmation != null) return false
+        if (localId == null) return false
+        return true
+    }
+
+    @Synchronized
+    fun finish(token: SupportRequestToken): Boolean {
+        val current = active ?: return false
+        if (current.token != token) return false
+        rememberFinishedRequest(current)
+        active = null
+        generation += 1
+        return true
+    }
+
+    @Synchronized
+    fun invalidate() {
+        active?.let(::rememberFinishedRequest)
+        active = null
+        generation += 1
+    }
+
+    private fun confirm(
+        current: ActiveRequest,
+        requestId: String,
+        source: SupportQueueConfirmationSource,
+        reused: Boolean
+    ): SupportCorrelationResult {
+        val normalizedRequestId = requestId.trim()
+        if (normalizedRequestId.isBlank()) return ignored()
+
+        val existing = current.confirmation
+        if (existing != null) {
+            return if (existing.requestId == normalizedRequestId) {
+                SupportCorrelationResult(
+                    status = SupportCorrelationStatus.DUPLICATE,
+                    confirmation = existing
+                )
+            } else {
+                ignored()
+            }
+        }
+
+        val confirmation = SupportQueueConfirmation(
+            token = current.token,
+            requestId = normalizedRequestId,
+            source = source,
+            reused = reused
+        )
+        current.confirmation = confirmation
+        rememberRequestId(confirmation.requestId)
+        return SupportCorrelationResult(
+            status = SupportCorrelationStatus.CONFIRMED,
+            confirmation = confirmation
+        )
+    }
+
+    private fun ignored(): SupportCorrelationResult =
+        SupportCorrelationResult(status = SupportCorrelationStatus.IGNORED)
+
+    private fun rememberFinishedRequest(request: ActiveRequest) {
+        val requestId = request.confirmation?.requestId
+        if (requestId == null) {
+            untaggedLegacyEventIsSafe = false
+        } else {
+            rememberRequestId(requestId)
+        }
+    }
+
+    private fun rememberRequestId(requestId: String) {
+        knownRequestIds.add(requestId)
+        while (knownRequestIds.size > MAX_KNOWN_REQUEST_IDS) {
+            val oldest = knownRequestIds.iterator()
+            if (!oldest.hasNext()) break
+            oldest.next()
+            oldest.remove()
+        }
+    }
+
+    private companion object {
+        const val MAX_KNOWN_REQUEST_IDS = 16
+    }
+}
 
 class ClientSupportRepository(
     private val db: FirebaseFirestore = FirebaseDataSource.db,
@@ -52,11 +257,11 @@ class ClientSupportRepository(
     private val clientVerifications = db.collection("client_verifications")
     private val pnvRequests = db.collection("pnv_requests")
     private val supportSessions = db.collection("support_sessions")
-    private val sessions = db.collection("sessions")
-    private val supportReports = db.collection("support_reports")
     private val creditPackages = db.collection("credit_packages")
     private val creditOrders = db.collection("credit_orders")
     private val httpClient = OkHttpClient()
+    private val activeSessionRecoveryRepository =
+        ActiveSupportSessionRecoveryRepository(authRepository)
     private val enableDeviceAnchorLinkLookup = false
     @Volatile private var deviceAnchorLookupBlocked = false
     @Volatile private var verificationPhoneLookupBlocked = true // Regras do cliente bloqueiam list/query por telefone.
@@ -247,8 +452,9 @@ class ClientSupportRepository(
             "startedAt" to now,
             "endedAt" to null,
             "status" to "queued",
-            "isFreeFirstSupport" to startContext.isFreeFirstSupport,
-            "creditsConsumed" to startContext.creditsToConsume,
+            // Cobrança e gratuidade são sempre decididas pelo servidor ao reservar a fila.
+            "isFreeFirstSupport" to false,
+            "creditsConsumed" to 0,
             "requiresTechnicianRegistration" to (startContext.isNewClient || startContext.clientId == null),
             "problemSummary" to null,
             "solutionSummary" to null,
@@ -271,152 +477,35 @@ class ClientSupportRepository(
     suspend fun attachRealtimeSession(
         localSupportSessionId: String?,
         realtimeSessionId: String,
-        techName: String?
+        @Suppress("UNUSED_PARAMETER") techName: String?
     ): Boolean {
-        authRepository.ensureAnonAuth()
+        val clientUid = authRepository.ensureAnonAuth().trim()
+        if (clientUid.isBlank()) return false
         val sessionRef = resolveSupportSessionRef(localSupportSessionId, realtimeSessionId) ?: return false
-        val now = System.currentTimeMillis()
-        db.runTransaction { tx ->
-            val sessionSnap = tx.get(sessionRef)
-            if (!sessionSnap.exists()) return@runTransaction false
+        val session = sessionRef.get().await()
+        if (!session.exists() || session.getString("clientUid")?.trim() != clientUid) return false
 
-            val isFreeFirstSupport = sessionSnap.getBoolean("isFreeFirstSupport") ?: false
-            val billingAlreadyApplied = sessionSnap.getLong("billingAppliedAt") != null
-            val acceptedAt = sessionSnap.getLong("acceptedAt") ?: now
-            val clientId = sessionSnap.getString("clientId")
+        val linkedRealtimeSessionId = session.getString("sessionId")?.trim().orEmpty()
+        if (linkedRealtimeSessionId.isNotBlank() && linkedRealtimeSessionId != realtimeSessionId.trim()) {
+            return false
+        }
 
-            tx.set(
-                sessionRef,
-                mapOf(
-                    "sessionId" to realtimeSessionId,
-                    "status" to "in_progress",
-                    "acceptedAt" to acceptedAt,
-                    "techName" to techName,
-                    "updatedAt" to now
-                ),
-                SetOptions.merge()
-            )
-
-            if (isFreeFirstSupport && !billingAlreadyApplied && !clientId.isNullOrBlank()) {
-                val clientRef = clients.document(clientId)
-                val profileRef = clientProfiles.document(clientId)
-                val clientSnap = tx.get(clientRef)
-                val profileSnap = tx.get(profileRef)
-
-                val oldCredits = (clientSnap.getLong("credits") ?: 0L).toInt().coerceAtLeast(0)
-                val oldSupportsUsed = (clientSnap.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
-                val oldFreeUsed = clientSnap.getBoolean("freeFirstSupportUsed") ?: false
-
-                val supportsUsedAfter = oldSupportsUsed + 1
-                val freeUsedAfter = oldFreeUsed || isFreeFirstSupport
-
-                tx.set(
-                    clientRef,
-                    mapOf(
-                        "credits" to oldCredits,
-                        "supportsUsed" to supportsUsedAfter,
-                        "freeFirstSupportUsed" to freeUsedAfter,
-                        "status" to deriveClientStatus(oldCredits, freeUsedAfter),
-                        "updatedAt" to now
-                    ),
-                    SetOptions.merge()
-                )
-
-                val totalSessions = (profileSnap.getLong("totalSessions") ?: 0L).toInt()
-                val totalPaid = (profileSnap.getLong("totalPaidSessions") ?: 0L).toInt()
-                val totalFree = (profileSnap.getLong("totalFreeSessions") ?: 0L).toInt()
-                val totalCreditsPurchased = (profileSnap.getLong("totalCreditsPurchased") ?: 0L).toInt()
-                val totalCreditsUsed = (profileSnap.getLong("totalCreditsUsed") ?: 0L).toInt()
-
-                tx.set(
-                    profileRef,
-                    mapOf(
-                        "clientId" to clientId,
-                        "totalSessions" to totalSessions + 1,
-                        "totalPaidSessions" to totalPaid,
-                        "totalFreeSessions" to totalFree + 1,
-                        "totalCreditsPurchased" to totalCreditsPurchased,
-                        "totalCreditsUsed" to totalCreditsUsed,
-                        "lastSupportAt" to now,
-                        "updatedAt" to now
-                    ),
-                    SetOptions.merge()
-                )
-
-                tx.set(
-                    sessionRef,
-                    mapOf(
-                        "billingAppliedAt" to now,
-                        "updatedAt" to now
-                    ),
-                    SetOptions.merge()
-                )
-            }
-
-            true
-        }.await()
-        return true
+        return session.getString("status")?.trim()?.lowercase() in setOf(
+            "accepted",
+            "in_progress",
+            "completed",
+            "closed",
+            "ended"
+        )
     }
 
     suspend fun findActiveRealtimeSession(localSupportSessionId: String?): ActiveRealtimeSession? {
-        val uid = authRepository.ensureAnonAuth().trim()
-        if (uid.isBlank()) return null
-
-        val normalizedLocalSupportSessionId = localSupportSessionId?.trim().orEmpty()
-        val candidates = mutableListOf<DocumentSnapshot>()
-
-        if (normalizedLocalSupportSessionId.isNotBlank()) {
-            val byLocalSupportSession = runCatching {
-                sessions
-                    .whereEqualTo("clientUid", uid)
-                    .whereEqualTo("supportSessionId", normalizedLocalSupportSessionId)
-                    .whereEqualTo("status", "active")
-                    .limit(3)
-                    .get()
-                    .await()
-            }.getOrNull()
-            if (byLocalSupportSession != null) {
-                candidates += byLocalSupportSession.documents
-            }
-        }
-
-        val byClientUid = runCatching {
-            sessions
-                .whereEqualTo("clientUid", uid)
-                .whereEqualTo("status", "active")
-                .limit(8)
-                .get()
-                .await()
-        }.getOrNull()
-        if (byClientUid != null) {
-            candidates += byClientUid.documents
-        }
-
-        val best = candidates
-            .asSequence()
-            .filter { it.exists() }
-            .maxByOrNull { doc ->
-                doc.getLong("acceptedAt")
-                    ?: doc.getLong("updatedAt")
-                    ?: doc.getLong("createdAt")
-                    ?: 0L
-            } ?: return null
-
-        val sessionId = best.getString("sessionId")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: best.id.trim().takeIf { it.isNotBlank() }
+        val recovered = activeSessionRecoveryRepository
+            .findActiveSession(localSupportSessionId)
             ?: return null
-
-        val tech = best.get("tech") as? Map<*, *>
-        val techName = best.getString("techName")
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: (tech?.get("name") as? String)?.trim()?.takeIf { it.isNotBlank() }
-
         return ActiveRealtimeSession(
-            sessionId = sessionId,
-            techName = techName
+            sessionId = recovered.sessionId,
+            techName = recovered.techName
         )
     }
 
@@ -860,115 +949,25 @@ class ClientSupportRepository(
     suspend fun completeSupportSession(
         localSupportSessionId: String?,
         realtimeSessionId: String?,
-        techId: String?,
-        techName: String?,
-        problemSummary: String?,
-        solutionSummary: String?,
-        internalNotes: String?,
-        reportSummary: String?
+        @Suppress("UNUSED_PARAMETER") techId: String?,
+        @Suppress("UNUSED_PARAMETER") techName: String?,
+        @Suppress("UNUSED_PARAMETER") problemSummary: String?,
+        @Suppress("UNUSED_PARAMETER") solutionSummary: String?,
+        @Suppress("UNUSED_PARAMETER") internalNotes: String?,
+        @Suppress("UNUSED_PARAMETER") reportSummary: String?
     ): Boolean {
-        authRepository.ensureAnonAuth()
+        val clientUid = authRepository.ensureAnonAuth().trim()
+        if (clientUid.isBlank()) return false
         val sessionRef = resolveSupportSessionRef(localSupportSessionId, realtimeSessionId) ?: return false
-        val now = System.currentTimeMillis()
-        val completionResult = db.runTransaction { tx ->
-            val sessionSnap = tx.get(sessionRef)
-            if (!sessionSnap.exists()) return@runTransaction CompletionTransactionResult(false, null, null)
-
-            val clientId = sessionSnap.getString("clientId") ?: return@runTransaction CompletionTransactionResult(false, null, null)
-            val alreadyApplied = sessionSnap.getLong("billingAppliedAt") != null
-
-            val isFreeFirstSupport = sessionSnap.getBoolean("isFreeFirstSupport") ?: false
-            val creditsConsumed = (sessionSnap.getLong("creditsConsumed") ?: if (isFreeFirstSupport) 0L else 1L)
-                .toInt()
-                .coerceAtLeast(0)
-
-            val baseSessionPayload = mutableMapOf<String, Any?>(
-                "status" to "completed",
-                "endedAt" to now,
-                "techId" to techId,
-                "techName" to techName,
-                "problemSummary" to problemSummary,
-                "solutionSummary" to solutionSummary,
-                "internalNotes" to internalNotes,
-                "updatedAt" to now,
-                "expiresAt" to ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_SESSIONS),
-                "billingAppliedAt" to if (alreadyApplied) sessionSnap.getLong("billingAppliedAt") else now
-            )
-
-            if (!alreadyApplied) {
-                val clientRef = clients.document(clientId)
-                val profileRef = clientProfiles.document(clientId)
-                val clientSnap = tx.get(clientRef)
-                val profileSnap = tx.get(profileRef)
-
-                val oldCredits = (clientSnap.getLong("credits") ?: 0L).toInt().coerceAtLeast(0)
-                val oldSupportsUsed = (clientSnap.getLong("supportsUsed") ?: 0L).toInt().coerceAtLeast(0)
-                val oldFreeUsed = clientSnap.getBoolean("freeFirstSupportUsed") ?: false
-
-                val newCredits = if (isFreeFirstSupport) {
-                    oldCredits
-                } else {
-                    (oldCredits - creditsConsumed).coerceAtLeast(0)
-                }
-                val freeUsedAfter = oldFreeUsed || isFreeFirstSupport
-                val supportsUsedAfter = oldSupportsUsed + 1
-
-                tx.set(
-                    clientRef,
-                    mapOf(
-                        "credits" to newCredits,
-                        "supportsUsed" to supportsUsedAfter,
-                        "freeFirstSupportUsed" to freeUsedAfter,
-                        "status" to deriveClientStatus(newCredits, freeUsedAfter),
-                        "updatedAt" to now
-                    ),
-                    SetOptions.merge()
-                )
-
-                val totalSessions = (profileSnap.getLong("totalSessions") ?: 0L).toInt()
-                val totalPaid = (profileSnap.getLong("totalPaidSessions") ?: 0L).toInt()
-                val totalFree = (profileSnap.getLong("totalFreeSessions") ?: 0L).toInt()
-                val totalCreditsPurchased = (profileSnap.getLong("totalCreditsPurchased") ?: 0L).toInt()
-                val totalCreditsUsed = (profileSnap.getLong("totalCreditsUsed") ?: 0L).toInt()
-
-                tx.set(
-                    profileRef,
-                    mapOf(
-                        "clientId" to clientId,
-                        "totalSessions" to totalSessions + 1,
-                        "totalPaidSessions" to totalPaid + if (isFreeFirstSupport) 0 else 1,
-                        "totalFreeSessions" to totalFree + if (isFreeFirstSupport) 1 else 0,
-                        "totalCreditsPurchased" to totalCreditsPurchased,
-                        "totalCreditsUsed" to totalCreditsUsed + creditsConsumed,
-                        "lastSupportAt" to now,
-                        "updatedAt" to now
-                    ),
-                    SetOptions.merge()
-                )
-            }
-
-            tx.set(sessionRef, baseSessionPayload.filterValues { it != null }, SetOptions.merge())
-
-            CompletionTransactionResult(
-                completed = true,
-                sessionId = sessionSnap.id,
-                clientId = sessionSnap.getString("clientId")
-            )
-        }.await()
-
-        if (completionResult.completed && !completionResult.clientId.isNullOrBlank()) {
-            registerSupportReport(
-                sessionId = completionResult.sessionId ?: return true,
-                clientId = completionResult.clientId,
-                techId = techId,
-                summary = reportSummary ?: problemSummary,
-                actionsTaken = internalNotes,
-                solutionApplied = solutionSummary,
-                followUpNeeded = false
-            )
-        }
-
-        return completionResult.completed
+        val session = sessionRef.get().await()
+        if (!session.exists() || session.getString("clientUid")?.trim() != clientUid) return false
+        return session.getString("status")?.trim()?.lowercase() in setOf(
+            "completed",
+            "closed",
+            "ended",
+            "cancelled",
+            "canceled"
+        )
     }
 
     suspend fun listClientSupportHistory(clientId: String): List<SupportSessionRecord> {
@@ -990,41 +989,6 @@ class ClientSupportRepository(
         val normalized = packageId.trim()
         if (normalized.isBlank()) return null
         return creditPackages.document(normalized).get().await().toCreditPackageRecord()
-    }
-
-    private suspend fun registerSupportReport(
-        sessionId: String,
-        clientId: String,
-        techId: String?,
-        summary: String?,
-        actionsTaken: String?,
-        solutionApplied: String?,
-        followUpNeeded: Boolean
-    ) {
-        val now = System.currentTimeMillis()
-        val supportReportExpiresAt = ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_REPORTS)
-        val reportRef = supportReports.document()
-        reportRef.set(
-            mapOf(
-                "sessionId" to sessionId,
-                "clientId" to clientId,
-                "techId" to techId,
-                "createdAt" to now,
-                "expiresAt" to supportReportExpiresAt,
-                "summary" to summary,
-                "actionsTaken" to actionsTaken,
-                "solutionApplied" to solutionApplied,
-                "followUpNeeded" to followUpNeeded
-            ).filterValues { it != null }
-        ).await()
-        supportSessions.document(sessionId).set(
-            mapOf(
-                "reportId" to reportRef.id,
-                "expiresAt" to ttlTimestampFrom(now, RETENTION_DAYS_SUPPORT_SESSIONS),
-                "updatedAt" to now
-            ),
-            SetOptions.merge()
-        ).await()
     }
 
     private fun ttlTimestampFrom(baseMillis: Long, days: Long): Timestamp {
@@ -1715,16 +1679,9 @@ class ClientSupportRepository(
         val client: ClientRecord
     )
 
-    private data class CompletionTransactionResult(
-        val completed: Boolean,
-        val sessionId: String?,
-        val clientId: String?
-    )
-
     private companion object {
         const val RETENTION_DAYS_PNV_REQUESTS = 15L
         const val RETENTION_DAYS_SUPPORT_SESSIONS = 30L
-        const val RETENTION_DAYS_SUPPORT_REPORTS = 30L
         const val MILLIS_PER_DAY = 86_400_000L
 
         const val VERIFICATION_STATUS_PENDING = "pending"

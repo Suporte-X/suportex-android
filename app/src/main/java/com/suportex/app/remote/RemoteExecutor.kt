@@ -6,6 +6,8 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
@@ -16,7 +18,7 @@ object RemoteExecutor {
     private const val DEFAULT_LONG_PRESS_MS = 2000L
     private const val DEFAULT_DRAG_SEGMENT_MS = 120L
     private const val POINTER_HOLD_MS = 10000L
-    private var svc: RemoteControlService? = null
+    @Volatile private var svc: RemoteControlService? = null
     @Volatile private var captureFrameWidth = 0
     @Volatile private var captureFrameHeight = 0
     @Volatile private var ongoingDrag: GestureDescription.StrokeDescription? = null
@@ -40,6 +42,17 @@ object RemoteExecutor {
     }
 
     fun isReady(): Boolean = svc != null
+
+    fun disableAccessibilityService(): Boolean {
+        val service = svc ?: return false
+        Handler(Looper.getMainLooper()).post {
+            runCatching { service.disableSelf() }
+                .onFailure { error ->
+                    Log.w(TAG, "Falha ao desativar o Serviço de Acessibilidade", error)
+                }
+        }
+        return true
+    }
 
     fun tap(xNorm: Float, yNorm: Float) {
         val (x, y) = normalizeToPx(xNorm, yNorm) ?: return

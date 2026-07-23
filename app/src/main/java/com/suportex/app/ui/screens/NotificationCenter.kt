@@ -1,5 +1,13 @@
 package com.suportex.app.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -9,6 +17,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,8 +69,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 
 data class NotificationCenterUiState(
     val hasNotifications: Boolean,
@@ -179,50 +188,119 @@ fun NotificationBellButton(
 }
 
 @Composable
-fun NotificationCenterDialog(
+fun NotificationCenterOverlay(
+    visible: Boolean,
     uiState: NotificationCenterUiState,
     onDismiss: () -> Unit,
     onNotificationAction: (ClientNotificationUi) -> Unit,
     onNotificationDismiss: (ClientNotificationUi) -> Unit
 ) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+    HomeAnchoredOverlay(
+        visible = visible,
+        onDismiss = onDismiss,
+        panelAlignment = Alignment.TopEnd
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 20.dp, vertical = 30.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 430.dp),
-                shape = RoundedCornerShape(24.dp),
-                color = Color.White,
-                tonalElevation = 0.dp,
-                shadowElevation = 12.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 640.dp)
-                        .padding(horizontal = 16.dp, vertical = 14.dp)
-                ) {
-                    NotificationCenterHeader(onDismiss = onDismiss)
-                    Spacer(Modifier.height(8.dp))
+        NotificationCenterPanel(
+            uiState = uiState,
+            onDismiss = onDismiss,
+            onNotificationAction = onNotificationAction,
+            onNotificationDismiss = onNotificationDismiss
+        )
+    }
+}
 
-                    if (uiState.notifications.isEmpty()) {
-                        NotificationEmptyState(onDismiss = onDismiss)
-                    } else {
-                        NotificationList(
-                            notifications = uiState.notifications,
-                            onNotificationAction = onNotificationAction,
-                            onNotificationDismiss = onNotificationDismiss
-                        )
-                    }
-                }
+@Composable
+fun HomeAnchoredOverlay(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+    panelAlignment: Alignment = Alignment.TopEnd,
+    content: @Composable () -> Unit
+) {
+    Box(modifier = modifier.fillMaxSize()) {
+        AnimatedVisibility(
+            visible = visible,
+            modifier = Modifier.fillMaxSize(),
+            enter = fadeIn(animationSpec = tween(durationMillis = 160)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 140))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.32f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss
+                    )
+            )
+        }
+
+        AnimatedVisibility(
+            visible = visible,
+            modifier = Modifier
+                .align(panelAlignment)
+                .padding(start = 20.dp, top = 88.dp, end = 20.dp),
+            enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
+                expandVertically(
+                    animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+                    expandFrom = Alignment.Top
+                ) +
+                slideInVertically(
+                    animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+                    initialOffsetY = { height -> -height / 5 }
+                ),
+            exit = fadeOut(animationSpec = tween(durationMillis = 120)) +
+                shrinkVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    shrinkTowards = Alignment.Top
+                ) +
+                slideOutVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    targetOffsetY = { height -> -height / 5 }
+                )
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun NotificationCenterPanel(
+    uiState: NotificationCenterUiState,
+    onDismiss: () -> Unit,
+    onNotificationAction: (ClientNotificationUi) -> Unit,
+    onNotificationDismiss: (ClientNotificationUi) -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 430.dp)
+            .animateContentSize(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+            ),
+        shape = RoundedCornerShape(24.dp),
+        color = Color.White,
+        tonalElevation = 0.dp,
+        shadowElevation = 12.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 360.dp, max = 640.dp)
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            NotificationCenterHeader(onDismiss = onDismiss)
+            Spacer(Modifier.height(8.dp))
+
+            if (uiState.notifications.isEmpty()) {
+                NotificationEmptyState(onDismiss = onDismiss)
+            } else {
+                NotificationList(
+                    notifications = uiState.notifications,
+                    onNotificationAction = onNotificationAction,
+                    onNotificationDismiss = onNotificationDismiss
+                )
             }
         }
     }

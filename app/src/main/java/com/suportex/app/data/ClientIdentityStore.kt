@@ -22,6 +22,17 @@ class ClientIdentityStore(context: Context) {
         }
     }
 
+    fun clear() {
+        prefs.edit {
+            remove(KEY_PHONE)
+            remove(KEY_NAME)
+        }
+        appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE).edit {
+            remove(KEY_PHONE)
+            remove(KEY_NAME)
+        }
+    }
+
     private fun migrateLegacyPrefsIfNeeded() {
         val hasCurrentData = !prefs.getString(KEY_PHONE, null).isNullOrBlank() ||
             !prefs.getString(KEY_NAME, null).isNullOrBlank()

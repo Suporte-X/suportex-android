@@ -5,12 +5,19 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.edit
+import com.suportex.app.data.AuthRepository
 import com.suportex.app.data.ClientSupportRepository
+import io.socket.client.Ack
+import io.socket.client.IO
+import io.socket.client.Socket
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,15 +26,20 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import kotlin.math.abs
 
 class WaitingSupportMonitorService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val clientSupportRepository = ClientSupportRepository()
+    private val authRepository = AuthRepository()
     private var monitorJob: Job? = null
+    private var cancellationJob: Job? = null
     private var monitoredAnchorId: String? = null
     private var monitoredLocalSupportSessionId: String? = null
+    private var cancellingLocalSupportSessionId: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -38,6 +50,11 @@ class WaitingSupportMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL_WAITING) {
+            handleCancelWaiting(intent)
+            return START_NOT_STICKY
+        }
+
         if (intent?.action == ACTION_STOP_MONITOR) {
             writeWaitingStateToPrefs(anchorId = null, localSupportSessionId = null, startedAtMillis = null)
             stopSelfSafe()
@@ -80,6 +97,12 @@ class WaitingSupportMonitorService : Service() {
             return START_STICKY
         }
 
+        startMonitoring(anchorId, localSupportSessionId)
+
+        return START_STICKY
+    }
+
+    private fun startMonitoring(anchorId: String, localSupportSessionId: String?) {
         monitorJob?.cancel()
         monitoredAnchorId = anchorId
         monitoredLocalSupportSessionId = localSupportSessionId
@@ -111,7 +134,7 @@ class WaitingSupportMonitorService : Service() {
                         techName = recovered.techName,
                         localSupportSessionId = trackedSessionId
                     )
-                    writeWaitingStateToPrefs(anchorId = null, localSupportSessionId = null, startedAtMillis = null)
+                    clearWaitingStateIfMatches(trackedSessionId)
                     stopSelfSafe()
                     break
                 }
@@ -119,21 +142,191 @@ class WaitingSupportMonitorService : Service() {
                 delay(POLL_INTERVAL_MS)
             }
         }
+    }
 
-        return START_STICKY
+    private fun handleCancelWaiting(intent: Intent) {
+        val requestedLocalId = intent.getStringExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        val waitingState = readWaitingStateFromPrefs()
+        if (
+            requestedLocalId == null ||
+            waitingState.localSupportSessionId != requestedLocalId
+        ) {
+            Log.w(TAG, "Ação de cancelamento obsoleta ou sem identificador ignorada")
+            return
+        }
+        if (
+            cancellationJob?.isActive == true &&
+            cancellingLocalSupportSessionId == requestedLocalId
+        ) {
+            return
+        }
+
+        monitorJob?.cancel()
+        monitorJob = null
+        cancellingLocalSupportSessionId = requestedLocalId
+        startWaitingForeground(
+            localSupportSessionId = requestedLocalId,
+            startedAtMillis = waitingState.startedAtMillis,
+            contentOverride = "Cancelando sua espera com segurança...",
+            includeCancelAction = false
+        )
+
+        cancellationJob = serviceScope.launch {
+            val backendCancelled = cancelBackendQueue(requestedLocalId)
+            val localCancelled = backendCancelled && runCatching {
+                clientSupportRepository.cancelSupportRequest(requestedLocalId)
+                true
+            }.getOrElse { error ->
+                Log.w(TAG, "Falha ao marcar solicitação local como cancelada", error)
+                false
+            }
+
+            val latestState = readWaitingStateFromPrefs()
+            if (latestState.localSupportSessionId != requestedLocalId) {
+                cancellingLocalSupportSessionId = null
+                cancellationJob = null
+                latestState.anchorId?.let { currentAnchor ->
+                    startWaitingForeground(
+                        localSupportSessionId = latestState.localSupportSessionId,
+                        startedAtMillis = latestState.startedAtMillis
+                    )
+                    startMonitoring(currentAnchor, latestState.localSupportSessionId)
+                }
+                return@launch
+            }
+
+            if (backendCancelled && localCancelled) {
+                clearWaitingStateIfMatches(requestedLocalId)
+                sendBroadcast(
+                    Intent(ACTION_WAITING_SUPPORT_CANCELLED)
+                        .setPackage(packageName)
+                        .putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, requestedLocalId)
+                )
+                cancellingLocalSupportSessionId = null
+                cancellationJob = null
+                stopSelfSafe()
+                return@launch
+            }
+
+            Log.w(TAG, "Cancelamento da espera não foi confirmado; mantendo estado para nova tentativa")
+            cancellingLocalSupportSessionId = null
+            cancellationJob = null
+            startWaitingForeground(
+                localSupportSessionId = requestedLocalId,
+                startedAtMillis = latestState.startedAtMillis,
+                contentOverride = "Não foi possível cancelar agora. Tente novamente."
+            )
+            latestState.anchorId?.let { currentAnchor ->
+                startMonitoring(currentAnchor, requestedLocalId)
+            }
+        }
+    }
+
+    private suspend fun cancelBackendQueue(localSupportSessionId: String): Boolean {
+        val existingSocket = Conn.socket?.takeIf { it.connected() }
+        if (
+            existingSocket != null &&
+            emitBackendCancellation(existingSocket, localSupportSessionId)
+        ) {
+            return true
+        }
+
+        val idToken = runCatching {
+            authRepository.ensureAnonIdToken(forceRefresh = false)
+        }.getOrElse { error ->
+            Log.w(TAG, "Falha ao autenticar cancelamento da espera", error)
+            ""
+        }
+        if (idToken.isBlank()) return false
+
+        val options = IO.Options().apply {
+            forceNew = true
+            reconnection = false
+            timeout = SOCKET_CONNECT_TIMEOUT_MS
+            extraHeaders = mapOf(
+                "Authorization" to listOf("Bearer $idToken"),
+                "x-id-token" to listOf(idToken)
+            )
+        }
+        val temporarySocket = runCatching {
+            IO.socket(Conn.SERVER_BASE, options)
+        }.getOrElse { error ->
+            Log.w(TAG, "Falha ao preparar conexão para cancelar espera", error)
+            return false
+        }
+        val connected = CompletableDeferred<Boolean>()
+        temporarySocket.once(Socket.EVENT_CONNECT) {
+            connected.complete(true)
+        }
+        temporarySocket.once(Socket.EVENT_CONNECT_ERROR) {
+            connected.complete(false)
+        }
+
+        return try {
+            temporarySocket.connect()
+            val connectionReady = withTimeoutOrNull(SOCKET_CONNECT_TIMEOUT_MS) {
+                connected.await()
+            } == true
+            connectionReady &&
+                emitBackendCancellation(temporarySocket, localSupportSessionId)
+        } finally {
+            temporarySocket.off()
+            temporarySocket.disconnect()
+        }
+    }
+
+    private suspend fun emitBackendCancellation(
+        targetSocket: Socket,
+        localSupportSessionId: String
+    ): Boolean {
+        val ackDeferred = CompletableDeferred<Boolean>()
+        val payload = JSONObject().apply {
+            put("localSupportSessionId", localSupportSessionId)
+        }
+        val emitted = runCatching {
+            targetSocket.emit(
+                "support:cancel",
+                arrayOf<Any>(payload),
+                Ack { args ->
+                    val response = args.getOrNull(0) as? JSONObject
+                    ackDeferred.complete(response?.optBoolean("ok", false) == true)
+                }
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Falha ao enviar cancelamento da espera", error)
+        }.isSuccess
+        if (!emitted) return false
+
+        return withTimeoutOrNull(CANCEL_ACK_TIMEOUT_MS) {
+            ackDeferred.await()
+        } == true
     }
 
     override fun onDestroy() {
         monitorJob?.cancel()
         monitorJob = null
+        cancellationJob?.cancel()
+        cancellationJob = null
         serviceScope.cancel()
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "Foreground service timeout (startId=$startId, type=$fgsType); stopping safely")
+        stopSelfSafe()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startWaitingForeground(localSupportSessionId: String?, startedAtMillis: Long) {
+    private fun startWaitingForeground(
+        localSupportSessionId: String?,
+        startedAtMillis: Long,
+        contentOverride: String? = null,
+        includeCancelAction: Boolean = true
+    ) {
         ensureNotificationChannel(
             id = WAITING_CHANNEL_ID,
             name = "Fila de atendimento",
@@ -151,27 +344,59 @@ class WaitingSupportMonitorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val contentText = if (localSupportSessionId.isNullOrBlank()) {
-            "Aguardando tecnico. Voce pode usar outros apps enquanto espera."
+        val cancelPendingIntent = localSupportSessionId
+            ?.takeIf { includeCancelAction && it.isNotBlank() }
+            ?.let { localId ->
+                val cancelIntent = Intent(this, WaitingSupportMonitorService::class.java).apply {
+                    action = ACTION_CANCEL_WAITING
+                    putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, localId)
+                }
+                PendingIntent.getService(
+                    this,
+                    CANCEL_REQUEST_CODE_BASE + abs(localId.hashCode() % 10_000),
+                    cancelIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            }
+
+        val contentText = contentOverride ?: if (localSupportSessionId.isNullOrBlank()) {
+            "Aguardando técnico. Você pode usar outros apps enquanto espera."
         } else {
-            "Aguardando tecnico para o protocolo $localSupportSessionId."
+            "Aguardando técnico para o protocolo $localSupportSessionId."
         }
 
-        val notification = NotificationCompat.Builder(this, WAITING_CHANNEL_ID)
+        val notificationBuilder = NotificationCompat.Builder(this, WAITING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Suporte X em espera ativa")
             .setContentText(contentText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setWhen(startedAtMillis.coerceAtLeast(0L))
             .setUsesChronometer(true)
             .setContentIntent(openPendingIntent)
-            .build()
+        if (cancelPendingIntent != null) {
+            notificationBuilder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Cancelar espera",
+                cancelPendingIntent
+            )
+        }
+        val notification = notificationBuilder.build()
 
-        startForeground(WAITING_NOTIFICATION_ID, notification)
+        ServiceCompat.startForeground(
+            this,
+            WAITING_NOTIFICATION_ID,
+            notification,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+        )
     }
 
     private fun notifySupportAccepted(
@@ -186,15 +411,18 @@ class WaitingSupportMonitorService : Service() {
             importance = NotificationManager.IMPORTANCE_HIGH
         )
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_WAITING_SUPPORT_ACCEPTED
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            putExtra(EXTRA_TECH_NAME, techName)
-            localSupportSessionId
-                ?.takeIf { it.isNotBlank() }
-                ?.let { putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, it) }
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = InternalLaunchGuard.attach(
+            this,
+            Intent(this, MainActivity::class.java).apply {
+                action = ACTION_WAITING_SUPPORT_ACCEPTED
+                putExtra(EXTRA_SESSION_ID, sessionId)
+                putExtra(EXTRA_TECH_NAME, techName)
+                localSupportSessionId
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { putExtra(EXTRA_LOCAL_SUPPORT_SESSION_ID, it) }
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        )
         val pendingIntent = PendingIntent.getActivity(
             this,
             abs(sessionId.hashCode()) + 12_000,
@@ -202,8 +430,8 @@ class WaitingSupportMonitorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Tecnico"
-        val body = "$techLabel iniciou seu atendimento. Toque para abrir o Suporte X."
+        val techLabel = techName?.trim()?.takeIf { it.isNotBlank() } ?: "Técnico"
+        val body = "$techLabel iniciou seu atendimento. Toque para abrir."
         val notification = NotificationCompat.Builder(this, SESSION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_suporte_x)
             .setContentTitle("Atendimento iniciado")
@@ -212,7 +440,8 @@ class WaitingSupportMonitorService : Service() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
             .setAutoCancel(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setCategory(NotificationCompat.CATEGORY_EVENT)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(pendingIntent)
             .build()
 
@@ -243,8 +472,11 @@ class WaitingSupportMonitorService : Service() {
     private fun stopSelfSafe() {
         monitorJob?.cancel()
         monitorJob = null
+        cancellationJob?.cancel()
+        cancellationJob = null
         monitoredAnchorId = null
         monitoredLocalSupportSessionId = null
+        cancellingLocalSupportSessionId = null
         runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         runCatching { stopSelf() }
     }
@@ -284,6 +516,17 @@ class WaitingSupportMonitorService : Service() {
         }
     }
 
+    private fun clearWaitingStateIfMatches(localSupportSessionId: String): Boolean {
+        val currentState = readWaitingStateFromPrefs()
+        if (currentState.localSupportSessionId != localSupportSessionId) return false
+        writeWaitingStateToPrefs(
+            anchorId = null,
+            localSupportSessionId = null,
+            startedAtMillis = null
+        )
+        return true
+    }
+
     private data class WaitingState(
         val anchorId: String?,
         val localSupportSessionId: String?,
@@ -293,7 +536,10 @@ class WaitingSupportMonitorService : Service() {
     companion object {
         const val ACTION_START_MONITOR = "com.suportex.app.action.START_WAITING_SUPPORT_MONITOR"
         const val ACTION_STOP_MONITOR = "com.suportex.app.action.STOP_WAITING_SUPPORT_MONITOR"
+        const val ACTION_WAITING_SUPPORT_CANCELLED =
+            "com.suportex.app.action.WAITING_SUPPORT_CANCELLED"
 
+        private const val ACTION_CANCEL_WAITING = "com.suportex.app.action.CANCEL_WAITING_SUPPORT"
         private const val ACTION_WAITING_SUPPORT_ACCEPTED = "com.suportex.app.action.WAITING_SUPPORT_ACCEPTED"
         private const val EXTRA_SESSION_ID = "extra_session_id"
         private const val EXTRA_TECH_NAME = "extra_tech_name"
@@ -307,7 +553,10 @@ class WaitingSupportMonitorService : Service() {
         private const val WAITING_CHANNEL_ID = "suportex_waiting_queue"
         private const val SESSION_CHANNEL_ID = "suportex_session_events"
         private const val WAITING_NOTIFICATION_ID = 6_100
+        private const val CANCEL_REQUEST_CODE_BASE = 16_100
         private const val POLL_INTERVAL_MS = 4_000L
+        private const val SOCKET_CONNECT_TIMEOUT_MS = 8_000L
+        private const val CANCEL_ACK_TIMEOUT_MS = 8_000L
         private const val TAG = "SXS/WaitingService"
     }
 }

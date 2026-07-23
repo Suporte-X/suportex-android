@@ -91,17 +91,6 @@ class SessionRepository {
             .set(payload, SetOptions.merge()).await()
     }
 
-    suspend fun markSessionClosed(sessionId: String) {
-        authRepository.ensureAnonAuth()
-        val payload = mapOf(
-            "status" to "closed",
-            "closedAt" to System.currentTimeMillis(),
-            "updatedAt" to System.currentTimeMillis()
-        )
-        db.collection("sessions").document(sessionId)
-            .set(payload, SetOptions.merge()).await()
-    }
-
     suspend fun updateRealtimeState(
         sessionId: String,
         state: SessionState,
@@ -123,7 +112,8 @@ class SessionRepository {
         authRepository.ensureAnonAuth()
         val data = mutableMapOf<String, Any>(
             "ts" to timestamp,
-            "type" to type
+            "type" to type,
+            "from" to "client"
         )
         payload?.let { data["payload"] = cleanPayload(it) }
         db.collection("sessions").document(sessionId)

@@ -19,9 +19,22 @@ import androidx.core.app.NotificationCompat
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.ListenerRegistration
+import com.suportex.app.call.RtcIceConfig
+import com.suportex.app.call.RtcIceConfigRepository
+import com.suportex.app.call.toPeerConnectionIceServers
+import com.suportex.app.data.FirebaseDataSource
 import com.suportex.app.remote.RemoteCommandBus
 import com.suportex.app.remote.RemoteExecutor
-import com.suportex.app.data.FirebaseDataSource
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.webrtc.*
 import java.nio.ByteBuffer
@@ -43,7 +56,12 @@ class ScreenCaptureService : Service() {
     }
 
     private var started = false
+    private var starting = false
     private var stopping = false
+    private var startGeneration = 0L
+    private var startJob: Job? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val rtcIceConfigRepository = RtcIceConfigRepository()
 
     // WebRTC / captura
     private var capturer: ScreenCapturerAndroid? = null
@@ -78,7 +96,7 @@ class ScreenCaptureService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                if (started) return START_NOT_STICKY
+                if (started || starting || stopping) return START_NOT_STICKY
 
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
                 @Suppress("DEPRECATION")
@@ -97,120 +115,29 @@ class ScreenCaptureService : Service() {
                 try {
                     startAsForeground()
                     roomCode = room
+                    starting = true
+                    startGeneration += 1
+                    val generation = startGeneration
+                    startJob = serviceScope.launch {
+                        val iceConfig = try {
+                            rtcIceConfigRepository.getIceConfig(room)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Throwable) {
+                            RtcIceConfig.safeStunFallback(System.currentTimeMillis())
+                        }
 
-                    val projectionCallback = object : MediaProjection.Callback() {
-                        override fun onStop() {
-                            sendStatus("stopped", "mediaProjection.onStop")
-                            stopSelfSafe()
+                        withContext(Dispatchers.Main.immediate) {
+                            if (
+                                stopping ||
+                                generation != startGeneration ||
+                                roomCode != room
+                            ) {
+                                return@withContext
+                            }
+                            initializeCapture(resultData, room, iceConfig, generation)
                         }
                     }
-                    capturer = ScreenCapturerAndroid(resultData, projectionCallback)
-
-                    // === EGL antes da factory
-                    eglBase = EglBase.create()
-
-                    PeerConnectionFactory.initialize(
-                        PeerConnectionFactory.InitializationOptions
-                            .builder(applicationContext)
-                            .createInitializationOptions()
-                    )
-                    factory = PeerConnectionFactory.builder()
-                        .setVideoEncoderFactory(
-                            DefaultVideoEncoderFactory(
-                                eglBase!!.eglBaseContext,
-                                /* enableIntelVp8Encoder */ true,
-                                /* enableH264HighProfile */ true
-                            )
-                        )
-                        .setVideoDecoderFactory(
-                            DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
-                        )
-                        .createPeerConnectionFactory()
-
-                    surfaceTextureHelper = SurfaceTextureHelper.create(
-                        "CaptureThread",
-                        eglBase!!.eglBaseContext
-                    )
-
-                    videoSource = factory!!.createVideoSource(true)
-                    capturer!!.initialize(
-                        surfaceTextureHelper,
-                        applicationContext,
-                        videoSource!!.capturerObserver
-                    )
-                    val (captureWidth, captureHeight) = resolveCaptureSize()
-                    capturer!!.startCapture(captureWidth, captureHeight, 24)
-                    RemoteExecutor.setCaptureFrameSize(captureWidth, captureHeight)
-
-                    val iceServers = listOf(
-                        PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-                        // Coloque seu TURN em produção
-                    )
-
-                    if (certificates == null) {
-                        certificates = RtcCertificatePem.generateCertificate()
-                    }
-
-                    peerConnection = factory!!.createPeerConnection(
-                        PeerConnection.RTCConfiguration(iceServers).apply {
-                            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-                            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-                            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
-                        },
-                        object : PeerConnection.Observer {
-                            override fun onIceCandidate(c: IceCandidate) {
-                                writeIceCandidateEvent(c)
-                            }
-                            override fun onAddStream(p0: MediaStream?) {}
-                            override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
-                                when (newState) {
-                                    PeerConnection.PeerConnectionState.CONNECTED -> sendStatus("connected")
-                                    PeerConnection.PeerConnectionState.DISCONNECTED -> sendStatus("disconnected")
-                                    PeerConnection.PeerConnectionState.FAILED -> {
-                                        sendStatus("failed")
-                                        renegotiate(iceRestart = true)
-                                    }
-                                    else -> {}
-                                }
-                            }
-                            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
-                            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
-                            override fun onDataChannel(p0: DataChannel?) {
-                                val channel = p0 ?: return
-                                when (channel.label()) {
-                                    "control" -> registerControlChannel(channel)
-                                    "ctrl" -> registerCtrlChannel(channel)
-                                }
-                            }
-                            override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
-                            override fun onRemoveStream(p0: MediaStream?) {}
-                            override fun onRenegotiationNeeded() {}
-                            override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
-                            override fun onTrack(p0: RtpTransceiver?) {}
-                            override fun onIceConnectionReceivingChange(p0: Boolean) {}
-                        }
-                    )
-
-                    videoTrack = factory!!.createVideoTrack("video", videoSource!!)
-                    videoSender = peerConnection!!.addTrack(videoTrack!!, listOf("screen"))
-
-                    preferH264Codec()
-                    applyEncoderQuality(scaleDownBy = 1.33, maxFps = 24)
-                    applySenderParams(maxKbps = 1600, minKbps = 500, maxFps = 24, scaleDown = 1.33)
-                    startDebugStatsLoop()
-
-                    registerControlChannel(
-                        peerConnection!!.createDataChannel("control", DataChannel.Init())
-                    )
-
-                    val ctrlInit = DataChannel.Init().apply { ordered = true }
-                    registerCtrlChannel(peerConnection!!.createDataChannel("ctrl", ctrlInit))
-
-                    listenToSignalEvents()
-                    renegotiate(iceRestart = false)
-
-                    started = true
-                    RemoteCommandBus.setSessionActive(true)
                 } catch (_: SecurityException) {
                     stopSelfSafe()
                     return START_NOT_STICKY
@@ -228,6 +155,157 @@ class ScreenCaptureService : Service() {
         }
 
         return START_NOT_STICKY
+    }
+
+    private fun initializeCapture(
+        resultData: Intent,
+        room: String,
+        iceConfig: RtcIceConfig,
+        generation: Long
+    ) {
+        if (
+            stopping ||
+            generation != startGeneration ||
+            roomCode != room
+        ) {
+            return
+        }
+
+        try {
+            val projectionCallback = object : MediaProjection.Callback() {
+                override fun onStop() {
+                    sendStatus("stopped", "mediaProjection.onStop")
+                    stopSelfSafe()
+                }
+            }
+            capturer = ScreenCapturerAndroid(resultData, projectionCallback)
+
+            // === EGL antes da factory
+            eglBase = EglBase.create()
+
+            PeerConnectionFactory.initialize(
+                PeerConnectionFactory.InitializationOptions
+                    .builder(applicationContext)
+                    .createInitializationOptions()
+            )
+            factory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(
+                    DefaultVideoEncoderFactory(
+                        eglBase!!.eglBaseContext,
+                        /* enableIntelVp8Encoder */ true,
+                        /* enableH264HighProfile */ true
+                    )
+                )
+                .setVideoDecoderFactory(
+                    DefaultVideoDecoderFactory(eglBase!!.eglBaseContext)
+                )
+                .createPeerConnectionFactory()
+
+            surfaceTextureHelper = SurfaceTextureHelper.create(
+                "CaptureThread",
+                eglBase!!.eglBaseContext
+            )
+
+            videoSource = factory!!.createVideoSource(true)
+            capturer!!.initialize(
+                surfaceTextureHelper,
+                applicationContext,
+                videoSource!!.capturerObserver
+            )
+            val (captureWidth, captureHeight) = resolveCaptureSize()
+            capturer!!.startCapture(captureWidth, captureHeight, 24)
+            RemoteExecutor.setCaptureFrameSize(captureWidth, captureHeight)
+
+            val iceServers = iceConfig.toPeerConnectionIceServers()
+
+            if (certificates == null) {
+                certificates = RtcCertificatePem.generateCertificate()
+            }
+
+            peerConnection = factory!!.createPeerConnection(
+                PeerConnection.RTCConfiguration(iceServers).apply {
+                    sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+                    continualGatheringPolicy =
+                        PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+                    bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+                },
+                object : PeerConnection.Observer {
+                    override fun onIceCandidate(c: IceCandidate) {
+                        writeIceCandidateEvent(c)
+                    }
+                    override fun onAddStream(p0: MediaStream?) {}
+                    override fun onConnectionChange(
+                        newState: PeerConnection.PeerConnectionState?
+                    ) {
+                        when (newState) {
+                            PeerConnection.PeerConnectionState.CONNECTED ->
+                                sendStatus("connected")
+                            PeerConnection.PeerConnectionState.DISCONNECTED ->
+                                sendStatus("disconnected")
+                            PeerConnection.PeerConnectionState.FAILED -> {
+                                sendStatus("failed")
+                                renegotiate(iceRestart = true)
+                            }
+                            else -> {}
+                        }
+                    }
+                    override fun onIceConnectionChange(
+                        p0: PeerConnection.IceConnectionState?
+                    ) {}
+                    override fun onIceGatheringChange(
+                        p0: PeerConnection.IceGatheringState?
+                    ) {}
+                    override fun onDataChannel(p0: DataChannel?) {
+                        val channel = p0 ?: return
+                        when (channel.label()) {
+                            "control" -> registerControlChannel(channel)
+                            "ctrl" -> registerCtrlChannel(channel)
+                        }
+                    }
+                    override fun onIceCandidatesRemoved(p0: Array<out IceCandidate>?) {}
+                    override fun onRemoveStream(p0: MediaStream?) {}
+                    override fun onRenegotiationNeeded() {}
+                    override fun onSignalingChange(
+                        p0: PeerConnection.SignalingState?
+                    ) {}
+                    override fun onTrack(p0: RtpTransceiver?) {}
+                    override fun onIceConnectionReceivingChange(p0: Boolean) {}
+                }
+            )
+
+            videoTrack = factory!!.createVideoTrack("video", videoSource!!)
+            videoSender = peerConnection!!.addTrack(videoTrack!!, listOf("screen"))
+
+            preferH264Codec()
+            applyEncoderQuality(scaleDownBy = 1.33, maxFps = 24)
+            applySenderParams(
+                maxKbps = 1600,
+                minKbps = 500,
+                maxFps = 24,
+                scaleDown = 1.33
+            )
+            startDebugStatsLoop()
+
+            registerControlChannel(
+                peerConnection!!.createDataChannel("control", DataChannel.Init())
+            )
+
+            val ctrlInit = DataChannel.Init().apply { ordered = true }
+            registerCtrlChannel(peerConnection!!.createDataChannel("ctrl", ctrlInit))
+
+            listenToSignalEvents()
+            renegotiate(iceRestart = false)
+
+            starting = false
+            startJob = null
+            started = true
+            RemoteCommandBus.setSessionActive(true)
+        } catch (_: SecurityException) {
+            stopSelfSafe()
+        } catch (error: Throwable) {
+            Log.e(TAG, "Start error", error)
+            stopSelfSafe()
+        }
     }
 
     private fun applySenderParams(
@@ -766,6 +844,18 @@ class ScreenCaptureService : Service() {
     private fun stopSelfSafe() {
         if (stopping) return
         stopping = true
+        starting = false
+        startGeneration += 1
+        startJob?.cancel()
+        startJob = null
+        val endedRoomCode = roomCode
+        if (endedRoomCode.isNotBlank()) {
+            serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                withContext(NonCancellable) {
+                    rtcIceConfigRepository.clearSession(endedRoomCode)
+                }
+            }
+        }
         pingRunnable?.let { mainHandler.removeCallbacks(it) }
         pingRunnable = null
         statsRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -794,6 +884,7 @@ class ScreenCaptureService : Service() {
         try { eglBase?.release() } catch (_: Exception) {}
         eglBase = null
         started = false
+        roomCode = ""
         RemoteCommandBus.setSessionActive(false)
         RemoteExecutor.clearCaptureFrameSize()
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
@@ -808,6 +899,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         if (!stopping) stopSelfSafe()
+        serviceScope.cancel()
         super.onDestroy()
     }
 

@@ -5,9 +5,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.edit
 import kotlin.math.abs
 
@@ -55,6 +58,11 @@ class SessionAnchorService : Service() {
         super.onDestroy()
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "Foreground service timeout (startId=$startId, type=$fgsType); stopping safely")
+        stopSelfSafe()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startSessionForeground(sessionId: String, techName: String?, startedAtMillis: Long) {
@@ -65,11 +73,14 @@ class SessionAnchorService : Service() {
             importance = NotificationManager.IMPORTANCE_DEFAULT
         )
 
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            action = ACTION_OPEN_SESSION_CHAT
-            putExtra(EXTRA_SESSION_ID, sessionId)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
+        val openIntent = InternalLaunchGuard.attach(
+            this,
+            Intent(this, MainActivity::class.java).apply {
+                action = ACTION_OPEN_SESSION_CHAT
+                putExtra(EXTRA_SESSION_ID, sessionId)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        )
         val pendingIntent = PendingIntent.getActivity(
             this,
             abs(sessionId.hashCode()) + 14_000,
@@ -90,12 +101,21 @@ class SessionAnchorService : Service() {
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setWhen(startedAtMillis)
             .setUsesChronometer(true)
             .build()
 
-        startForeground(SESSION_ANCHOR_NOTIFICATION_ID, notification)
+        ServiceCompat.startForeground(
+            this,
+            SESSION_ANCHOR_NOTIFICATION_ID,
+            notification,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+        )
     }
 
     private fun ensureNotificationChannel(
@@ -173,5 +193,6 @@ class SessionAnchorService : Service() {
 
         private const val SESSION_ANCHOR_CHANNEL_ID = "suportex_session_anchor_v2"
         private const val SESSION_ANCHOR_NOTIFICATION_ID = 6_200
+        private const val TAG = "SXS/SessionAnchor"
     }
 }

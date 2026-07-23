@@ -27,9 +27,31 @@ data class ClientNotificationRecord(
     val dismissed: Boolean,
     val actionLabel: String?,
     val actionType: String,
+    val deliveryInApp: Boolean,
     val createdAt: Long,
     val expiresAt: Long?
 )
+
+internal fun shouldShowInNotificationCenter(
+    record: ClientNotificationRecord,
+    now: Long
+): Boolean {
+    return record.deliveryInApp &&
+        !record.dismissed &&
+        record.status != "dismissed" &&
+        (record.expiresAt == null || record.expiresAt > now)
+}
+
+internal fun resolveClientDeviceOwnerId(
+    authUid: String,
+    requestedClientId: String?
+): String? {
+    val uid = authUid.trim().takeIf { it.isNotBlank() } ?: return null
+    return requestedClientId
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: "uid_$uid"
+}
 
 class ClientNotificationRepository(
     private val db: FirebaseFirestore = FirebaseDataSource.db,
@@ -47,11 +69,12 @@ class ClientNotificationRepository(
         val token = fcmToken.trim()
         if (token.isBlank()) return
         val uid = authRepository.ensureAnonAuth()
+        val resolvedClientId = resolveClientDeviceOwnerId(uid, clientId) ?: return
         val now = System.currentTimeMillis()
         val documentId = "${uid}_${deviceAnchor.take(18)}"
         val payload = mapOf(
             "clientUid" to uid,
-            "clientId" to clientId?.trim()?.takeIf { it.isNotBlank() },
+            "clientId" to resolvedClientId,
             "deviceAnchor" to deviceAnchor,
             "platform" to "android",
             "fcmToken" to token,
@@ -92,7 +115,7 @@ class ClientNotificationRepository(
             val rows = snapshotsBySource.values
                 .flatMap { it.values }
                 .distinctBy { it.id }
-                .filter { !it.dismissed && it.status != "dismissed" && (it.expiresAt == null || it.expiresAt > now) }
+                .filter { shouldShowInNotificationCenter(it, now) }
                 .sortedWith(
                     compareByDescending<ClientNotificationRecord> { priorityRank(it.priority) }
                         .thenByDescending { it.createdAt }
@@ -173,6 +196,7 @@ class ClientNotificationRepository(
             dismissed = getBoolean("dismissed") == true || status == "dismissed",
             actionLabel = getString("actionLabel")?.trim()?.takeIf { it.isNotBlank() },
             actionType = getString("actionType")?.trim()?.uppercase()?.takeIf { it.isNotBlank() } ?: "NONE",
+            deliveryInApp = getBoolean("delivery.inApp") ?: true,
             createdAt = millisOf(get("createdAt")) ?: 0L,
             expiresAt = millisOf(get("expiresAt"))
         )

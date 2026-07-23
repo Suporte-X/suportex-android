@@ -15,7 +15,7 @@ class GooglePlayReviewPrompt(
 
     fun onInternalRatingSubmitted(activity: Activity) {
         incrementCompletedSupportCount()
-        requestReview(activity)
+        logEvent("play_review_deferred_after_internal_rating")
     }
 
     fun requestReview(activity: Activity, onFinished: (Boolean) -> Unit = {}) {

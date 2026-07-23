@@ -1,5 +1,5 @@
 [versions]
-agp = "9.2.1"
+agp = "9.3.0"
 kotlin = "2.2.20"
 coreKtx = "1.10.1"
 junit = "4.13.2"
@@ -15,12 +15,11 @@ navigationCompose = "2.7.7"
 lifecycleViewmodelCompose = "2.8.2"
 composeMaterialIconsExtended = "1.7.2"
 okhttp = "4.12.0"
-webrtc = "137.7151.04"
+webrtc = "137.7151.05"
 socketIo = "2.1.0"
-firebaseBom = "33.7.0"
-firebasePnv = "16.0.0"
+firebaseBom = "34.16.0"
 coroutinesPlayServices = "1.8.1"
-media3 = "1.4.1"
+media3 = "1.10.1"
 coil = "2.7.0"
 lottieCompose = "6.6.7"
 playAppUpdate = "2.1.0"
@@ -48,10 +47,10 @@ okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhtt
 webrtc = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
 socket-io-client = { group = "io.socket", name = "socket.io-client", version.ref = "socketIo" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
-firebase-firestore-ktx = { group = "com.google.firebase", name = "firebase-firestore-ktx" }
-firebase-messaging-ktx = { group = "com.google.firebase", name = "firebase-messaging-ktx" }
-firebase-auth-ktx = { group = "com.google.firebase", name = "firebase-auth-ktx" }
-firebase-pnv = { group = "com.google.firebase", name = "firebase-pnv", version.ref = "firebasePnv" }
+firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
+firebase-pnv = { group = "com.google.firebase", name = "firebase-pnv" }
 firebase-analytics = { group = "com.google.firebase", name = "firebase-analytics" }
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "coroutinesPlayServices" }
 androidx-compose-animation = { group = "androidx.compose.animation", name = "animation" }
